@@ -42,3 +42,16 @@
 4. Consider: FIDEDUPERANGE + FS_IOC_SETFLAGS-with-real-flags probes; tune ioctlscan
    arg for TUNSETIFF to avoid interface creation on cap-full sandboxes (currently
    non-persistent, auto-destroyed on close).
+
+## UPDATE (same day, continuation)
+- [DONE] ioctl names now basename-based (ioctl-tty-TIOCSTI, ioctl-f-FIBMAP, ...);
+  the "grep didn't match" mystery was a bad pattern: '^\[.\] ' cannot match
+  '[ii]' — use '^\[..\] '. No code issue.
+- [DONE] README: auto mode, --safe/--adopt, .landscan-state, ioctl enumeration,
+  raw btrfs ioctls, portability notes.
+- [DONE] Full test suite re-run after all fixes: ALL TESTS PASSED (8 groups).
+- [DONE] Zero-flag auto battery validated on real replica: 134 checks, 40 ioctl
+  entries, auto-OUT=/opt discovered, auto-baseline written, rc=1 (17 unexpected
+  = genuine findings: chroot, pidfd_getfd-init, io_uring, ptrace-child, etc).
+- Remaining idea (optional): FIDEDUPERANGE probe; per-request 'want' tuning for
+  REACHABLE-classified dangerous ioctls (currently all info).

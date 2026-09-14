@@ -640,7 +640,7 @@ if [ -x "$HELPER" ]; then
   printf '%s\n' "$SAN/f" "$SAN" /dev/tty /dev/loop-control /dev/mapper/control /dev/kvm /dev/net/tun /dev/input/event0 /dev/fb0 /dev/sda /dev/nvme0n1 /dev/dri/card0 > "$tl"
   while IFS= read -r tgt; do
     [ -n "$tgt" ] || continue
-    short=${tgt//\//-}
+    short=$(basename "$tgt")
     [ $VERBOSE = 1 ] && echo "  \$ helper ioctlscan $tgt"
     timeout 15 "$HELPER" ioctlscan "$tgt" > "$SCRATCH/scan.out" 2>&1
     while read -r v req rest; do
