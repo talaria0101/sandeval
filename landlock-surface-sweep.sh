@@ -49,6 +49,7 @@
 # EXIT: 0 all as expected · 1 unexpected/inconclusive verdicts · 2 usage/setup error
 
 set -u
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"   # fresh agents love `sh script`: refuse dash, re-exec bash
 die(){ echo "ERROR: $*" >&2; exit 2; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 sec(){ echo; echo "=== $* ==="; }
@@ -560,6 +561,7 @@ trap 'jobs -p | xargs -r kill 2>/dev/null
 sec "0. PREFLIGHT"
 echo "kernel: $(uname -r)   date: $(date -u +%FT%TZ)"
 echo "uid: $(id -u 2>/dev/null)   $(grep -m1 '^CapEff:' /proc/self/status 2>/dev/null | tr -s '\t' ' ')"
+[ "$(id -u 2>/dev/null)" = 0 ] && echo "WARNING: running as ROOT — deny-verdicts are weak evidence (capability gates are all open). Any ALLOW on a deny-wanted check is still a real finding, but treat this run as privileged-context recon, not conformance proof. Run as the agent user for meaningful denies." >&2
 rm -rf "$SAN"
 hcheck landlock-abi info landlock-abi
 # sanity: if these "fail", IN/OUT are reversed or IN is unusable — verdicts unreliable
