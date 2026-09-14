@@ -6,7 +6,7 @@ sandbox versions.
 
 ```json
 {
-  "version": "5.0.0",
+  "version": "6.0.0",
   "generated": "2026-09-14T12:00:00+00:00",
   "context": {
     "in_dir": "/workspace",
@@ -55,8 +55,17 @@ sandbox versions.
 | code | meaning |
 |---|---|
 | 0 | no `FAIL` |
-| 1 | at least one `FAIL` |
+| 1 | at least one `FAIL`, or one `SUSPECTED` under `--fail-on SUSPECTED` |
 | 2 | usage error / not a replica / no vectors selected |
+
+## Companion documents
+
+- `sandeval list --json FILE` — the catalogue: id, title, severity, maps_to,
+  host_verify and the `host_global` tag per vector.
+- `sandeval diff OLD NEW --json FILE` — `regressions`, `movements`, and a
+  `changes[]` list of `{id, old, new, verdict}` with verdicts `REGRESSION` /
+  `IMPROVED` / `CHANGED` / `NEW` / `GONE`. Only `REGRESSION` moves the exit
+  code (rc 1); `NEW` and `GONE` rows are reported, not scored.
 
 ## Versioning
 

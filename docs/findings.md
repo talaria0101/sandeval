@@ -254,3 +254,50 @@ environment.
 `host-verify/verify.sh --clean` removes every marker this harness writes:
 `user.sandeval.*`/`user.SANDEVAL_*` xattrs, `HOST-RCE-proof.txt`,
 `HOST-RCE-marker`, `HOST-passwd.txt`, and the `/tmp`/`/dev/shm` markers.
+
+---
+
+## v6 pass (2026-09-14, bailey replica, `sandeval auto` 6.0.0)
+
+Battery: FAIL=10, PASS=7, SKIP=3, SUSPECTED=4; sweep rc=1 with its own
+unexpected findings. New in this pass:
+
+### V21 — pidfd_getfd (FAIL)
+
+`pidfd_open(1)` succeeded and `pidfd_getfd` duplicated eight of pid 1's
+descriptors (stdio pipes among them). The duplicates were fstat-verified, not
+read: the vector never touches a live stream it does not own. Together with
+V5 (write-open via `/proc/1/fd/N`) this makes peer-fd theft a confirmed
+surface. Fix: seccomp-deny `pidfd_open` and `pidfd_getfd` (434/438).
+
+### V22 — chroot escape walk (SUSPECTED)
+
+`chroot(2)` is reachable (Landlock has no right for it), and the classic walk
+— hold a descriptor outside the cage, fchdir, climb with `..` — reached the
+real root in three steps. Landlock still mediated every path the escaped
+vantage opened, so this is SUSPECTED, not FAIL: it is only an escape if
+confinement rests on the changed root. Fix: none needed while Landlock is the
+control; deny `chroot` in seccomp if anyone ever stacks a chroot cage.
+
+### V23 — behavioral ptrace (PASS)
+
+The real primitive, not a pid-0 probe: the child's `PTRACE_TRACEME` was
+denied, so no attach, no PEEKDATA. The denylist covers ptrace properly.
+
+### V24 — io_uring conformance (PASS)
+
+Direct `openat(O_WRONLY)` on an out-of-policy host file: EACCES. The same open
+submitted as `IORING_OP_OPENAT`: EACCES. Landlock is enforced on the async
+path on this kernel. The helper believes only a `write(2)` that actually
+lands, so this PASS is meaningful rather than an encoding accident.
+
+### Unchanged findings
+
+V1/V2 (metadata+xattr on host files), V3 (`/tmp`, `/dev/shm` writable), V4
+(daemon env with `GH_TOKEN` readable via `/proc/1/environ`), V5 (orchestrator
+fd write-open), V6 (`clone(CLONE_NEWUSER)` with full caps), V10 (no memory or
+pids bound), V11 (inotify outside policy), V16 (peer maps readable) all
+reproduced as before. V13 SUSPECTED (affected CPU, no repro), V18 SUSPECTED
+(persistence surface), V20 SUSPECTED (one credential file readable, no token
+shape). V8 SKIP with two worktrees found below the workspace and no armed
+payload — the reachability is real, the trap was not set.

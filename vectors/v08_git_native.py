@@ -51,9 +51,10 @@ class GitNativeVector(Vector):
                 )
             return Result(Status.SUSPECTED, f"proof file exists but markers absent: {proof}")
 
-        gitdir = os.path.join(ctx.workspace, ".git")
-        if not os.path.isdir(gitdir):
-            return Result(Status.SKIP, f"no git worktree at {ctx.workspace}")
+        worktrees = self._worktrees(ctx)
+        if not worktrees:
+            return Result(Status.SKIP, f"no git worktree at or below {ctx.workspace}")
+        gitdir = os.path.join(worktrees[0], ".git")
 
         armed = []
         hooks_dir = os.path.join(gitdir, "hooks")
@@ -81,7 +82,40 @@ class GitNativeVector(Vector):
             )
         if armed:
             return Result(Status.SUSPECTED, "git hook/config present; ask-gate not writable")
-        return Result(Status.SKIP, "worktree present but no hook/config payload found")
+        return Result(
+            Status.SKIP,
+            f"worktree present ({len(worktrees)} found below {ctx.workspace}) but no "
+            "hook/config payload found",
+            {"worktrees": worktrees},
+        )
+
+    @staticmethod
+    def _worktrees(ctx) -> list:
+        """Worktrees at the workspace, the in-policy dir, or one level below.
+
+        The daemon drives git in whatever directory the errand cloned, which is
+        often the workspace itself but just as often a repo nested inside it.
+        """
+        candidates = [ctx.workspace, ctx.in_dir]
+        try:
+            candidates.extend(
+                sorted(
+                    os.path.join(ctx.workspace, name)
+                    for name in os.listdir(ctx.workspace)
+                    if os.path.isdir(os.path.join(ctx.workspace, name, ".git"))
+                )
+            )
+        except OSError:
+            pass
+        found, seen = [], set()
+        for path in candidates:
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            if os.path.isdir(os.path.join(path, ".git")):
+                found.append(path)
+        return found
 
     @staticmethod
     def _writable(path):
