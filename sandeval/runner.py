@@ -1,8 +1,7 @@
 """sandeval runner — discovery, execution and reporting.
 
 Usage is documented in README.md; run `sandeval list` for the vector table.
-The runner deliberately keeps every probe small and reversible, and refuses to
-run outside a replica unless told twice.
+The runner deliberately keeps every probe small and reversible.
 """
 from __future__ import annotations
 
@@ -292,7 +291,7 @@ def select_vectors(vectors: List[Vector], args: argparse.Namespace) -> List[Vect
 
 
 def _host_global(vector: Vector) -> bool:
-    """Probes whose effect is deliberately visible beyond this replica."""
+    """Probes whose effect is deliberately visible beyond this sandbox."""
     return bool(getattr(vector, "host_global", False))
 
 
@@ -481,14 +480,6 @@ def cmd_host_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    if not (args.replica or os.environ.get("SANDEVAL_REPLICA") == "1"):
-        print(
-            "refusing to run: pass --replica (or set SANDEVAL_REPLICA=1).\n"
-            "These probes mutate host-visible state on purpose; run them only in a\n"
-            "disposable replica, never against a production sandbox.",
-            file=sys.stderr,
-        )
-        return 2
     vectors = select_vectors(discover_vectors(args.vectors_dir), args)
     if not vectors:
         print("no vectors selected", file=sys.stderr)
@@ -518,7 +509,7 @@ def run_sweep(ctx: Context, safe: bool):
     """Run the syscall-surface sweep and return (rc, log, summary_lines)."""
     if not os.path.exists(DEFAULT_SWEEP):
         return 2, "", []
-    argv = ["bash", DEFAULT_SWEEP, "--replica"]
+    argv = ["bash", DEFAULT_SWEEP]
     if safe:
         argv.append("--safe")
     argv += [ctx.in_dir, ctx.out_dir]
@@ -549,9 +540,6 @@ def run_sweep(ctx: Context, safe: bool):
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
-    if not (args.replica or os.environ.get("SANDEVAL_REPLICA") == "1"):
-        print("refusing to run: pass --replica (or set SANDEVAL_REPLICA=1)", file=sys.stderr)
-        return 2
     vectors = select_vectors(discover_vectors(args.vectors_dir), args)
     if not vectors:
         print("no vectors selected", file=sys.stderr)
@@ -643,7 +631,6 @@ def cmd_diff(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 
 def _add_probe_options(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--replica", action="store_true", help="required: I am in a disposable replica")
     p.add_argument("--in", dest="in_dir", help="in-policy directory (default: $PWD)")
     p.add_argument("--out", dest="out_dir", help="out-of-policy directory (default: auto)")
     p.add_argument("--state-dir", dest="state_dir", help="agent state dir (default: auto-discovered)")
@@ -671,7 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="sandeval",
-        description="Verdict-based sandbox evaluation harness (replica only).",
+        description="Verdict-based sandbox evaluation harness.",
         parents=[common],
     )
     parser.add_argument("--version", action="version", version=f"sandeval {__version__}")

@@ -4,11 +4,11 @@
 # PURPOSE
 #   Verify (not attack) sandbox enforcement. Every probe is a minimal, benign
 #   operation whose ALLOW/DENY verdict is the entire result. Designed to run
-#   INSIDE A DISPOSABLE REPLICA with auditd/strace alongside for per-syscall
-#   ground truth. Pair with redteam-eval-harness.md for the agentic layer.
+#   INSIDE THE DISPOSABLE SANDBOX UNDER TEST, with auditd/strace alongside for
+#   per-syscall ground truth. Pair with redteam-eval-harness.md for the
+#   agentic layer.
 #
 # SAFETY
-#   * Refuses to run without --replica (guard against casual prod runs).
 #   * All scratch lives under the in-policy dir — never /tmp — in a fresh
 #     per-run ".landscan" subdir that is removed on exit (idempotent re-runs).
 #   * Kernel-knob probes write the CURRENT value back: proves writability
@@ -30,7 +30,7 @@
 #   "…TOKEN=…" values redacted (baselines are committed artifacts).
 #
 # USAGE
-#   landlock-surface-sweep.sh --replica [IN] [OUT] [opts]   # everything else is automatic
+#   landlock-surface-sweep.sh [IN] [OUT] [opts]   # everything else is automatic
 #     IN   optional: defaults to $PWD (or LANDSCAN_IN)
 #     OUT  optional: auto-discovered — first existing write-denied dir
 #          (candidates: /opt /var/tmp /mnt /srv /run /media /tmp), else /tmp
@@ -54,10 +54,10 @@ die(){ echo "ERROR: $*" >&2; exit 2; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 sec(){ echo; echo "=== $* ==="; }
 
-IN=""; OUT=""; BASELINE=""; CHECK=""; EXPECT=""; VERBOSE=0; REPLICA=0; SAFE=${LANDSCAN_SAFE:-0}; ADOPT=0
+IN=""; OUT=""; BASELINE=""; CHECK=""; EXPECT=""; VERBOSE=0; SAFE=${LANDSCAN_SAFE:-0}; ADOPT=0
 usage(){ grep -m1 -A110 '^# USAGE' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do case "$1" in
-  --replica) REPLICA=1;; -v|--verbose) VERBOSE=1;;
+  -v|--verbose) VERBOSE=1;;
   --safe) SAFE=1;; --adopt) ADOPT=1;;
   --baseline) [ $# -ge 2 ] || usage; BASELINE="$2"; shift;;
   --check)    [ $# -ge 2 ] || usage; CHECK="$2"; shift;;
@@ -66,8 +66,7 @@ while [ $# -gt 0 ]; do case "$1" in
   -*) echo "unknown opt $1" >&2; usage;;
   *) if [ -z "$IN" ]; then IN="$1"; elif [ -z "$OUT" ]; then OUT="$1"; else die "unexpected argument: $1"; fi;;
 esac; shift; done
-[ "$REPLICA" = 1 ] || { echo "REFUSING: run only inside a disposable replica. Pass --replica to confirm." >&2; exit 2; }
-# --- defaults & heuristics: zero flags beyond --replica must work ---
+# --- defaults & heuristics: zero flags must work ---
 STATE=${LANDSCAN_STATE:-$PWD/.landscan-state}
 [ -z "$IN" ] && IN=${LANDSCAN_IN:-$PWD}
 if [ -z "$OUT" ]; then

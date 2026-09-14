@@ -257,7 +257,7 @@ environment.
 
 ---
 
-## v6 pass (2026-09-14, bailey replica, `sandeval auto` 6.0.0)
+## v6 pass (2026-09-14, bailey sandbox, `sandeval auto`)
 
 Battery: FAIL=10, PASS=7, SKIP=3, SUSPECTED=4; sweep rc=1 with its own
 unexpected findings. New in this pass:

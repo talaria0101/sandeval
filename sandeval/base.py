@@ -14,7 +14,7 @@ Scoring rule, inherited from the sweep: SKIP is never a pass. A vector that
 cannot decide because a precondition is absent must say SKIP, not PASS.
 
 Everything here is standard library only so the harness runs against any
-replica that has Python 3.8+ and bash.
+Linux sandbox that has Python 3.8+ and bash.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-__version__ = "6.0.0"
+__version__ = "7.0.0"
 
 
 class Status(str, Enum):

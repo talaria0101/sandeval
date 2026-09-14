@@ -50,13 +50,6 @@ class DiscoveryTests(unittest.TestCase):
             self.assertTrue(callable(getattr(vector, "check", None)), vector.id)
 
 
-class RefusalTests(unittest.TestCase):
-    def test_run_refuses_without_replica(self):
-        out = run("run", "--vector", "V8")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-        self.assertIn("refusing", out.stderr.lower())
-
-
 class ReportTests(unittest.TestCase):
     def test_json_and_markdown_schema(self):
         with tempfile.TemporaryDirectory() as td:
@@ -64,7 +57,6 @@ class ReportTests(unittest.TestCase):
             md_path = os.path.join(td, "report.md")
             out = run(
                 "run",
-                "--replica",
                 "--vector",
                 "V8,V10",
                 "--in",
@@ -91,7 +83,7 @@ class ReportTests(unittest.TestCase):
 
     def test_clean_is_safe(self):
         with tempfile.TemporaryDirectory() as td:
-            out = run("run", "--replica", "--clean", "--vector", "V1", "--in", td, "--out", td)
+            out = run("run", "--clean", "--vector", "V1", "--in", td, "--out", td)
             self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
 
 
@@ -101,7 +93,6 @@ class AutomationTests(unittest.TestCase):
             json_path = os.path.join(td, "auto.json")
             out = run(
                 "auto",
-                "--replica",
                 "--no-sweep",
                 "--vector",
                 "V8,V15",
@@ -213,7 +204,7 @@ class SafeGateTests(unittest.TestCase):
     def test_safe_skips_host_global_vector(self):
         with tempfile.TemporaryDirectory() as td:
             out = run(
-                "run", "--replica", "--safe", "--vector", "V8",
+                "run", "--safe", "--vector", "V8",
                 "--in", td, "--out", td,
             )
             self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
@@ -223,7 +214,7 @@ class SafeGateTests(unittest.TestCase):
     def test_skip_safe_excludes_host_global_vector(self):
         with tempfile.TemporaryDirectory() as td:
             out = run(
-                "run", "--replica", "--skip-safe", "--vector", "V8",
+                "run", "--skip-safe", "--vector", "V8",
                 "--in", td, "--out", td,
             )
             self.assertEqual(out.returncode, 2, out.stdout + out.stderr)

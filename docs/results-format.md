@@ -6,7 +6,7 @@ sandbox versions.
 
 ```json
 {
-  "version": "6.0.0",
+  "version": "7.0.0",
   "generated": "2026-09-14T12:00:00+00:00",
   "context": {
     "in_dir": "/workspace",

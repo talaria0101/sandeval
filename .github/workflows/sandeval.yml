@@ -2,8 +2,8 @@ name: sandeval
 
 # The vectors probe a live sandbox, so CI runs the parts that do not need one:
 # the syntax of the shell tools, the harness self-tests, the vector catalogue
-# and a smoke run against throwaway directories. A real run is
-# `bin/sandeval auto --replica` inside a disposable replica.
+# and a smoke run against throwaway directories. A real run is ./run.sh
+# inside the disposable sandbox under test.
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
           bash -n sweep/landlock-surface-sweep.sh
           bash -n tests/run-tests.sh
           bash -n host-verify/verify.sh
-          bash -n run-all.sh
+          bash -n run.sh
       - name: harness self-tests
         run: python3 tests/test_harness.py
       - name: sweep engine self-tests
@@ -35,6 +35,6 @@ jobs:
         run: python3 -c "import json; d=json.load(open('examples/report.example.json')); assert set(d) >= {'version','generated','context','summary','results'}"
       - name: smoke run against temp dirs
         run: |
-          python3 bin/sandeval run --replica --vector V15,V17 \
+          python3 bin/sandeval run --vector V15,V17 \
             --in "$RUNNER_TEMP" --out "$RUNNER_TEMP" \
             --json "$RUNNER_TEMP/report.json" --report "$RUNNER_TEMP/report.md"

@@ -4,3 +4,6 @@
 __pycache__/
 *.pyc
 .sandeval-*/
+sandeval-report.json
+sandeval-report.md
+sandeval-sweep.log
