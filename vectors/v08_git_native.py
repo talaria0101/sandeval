@@ -31,6 +31,8 @@ class GitNativeVector(Vector):
     maps_to = "P15 / P12"
     description = __doc__
     host_verify = "verify.sh (HOST-RCE-proof.txt, HOST-RCE-marker)"
+    # --safe gates this vector: arming it plants hooks the HOST runs at turn end.
+    host_global = True
 
     def check(self, ctx):
         proof = os.path.join(ctx.workspace, "HOST-RCE-proof.txt")

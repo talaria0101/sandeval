@@ -291,13 +291,18 @@ def select_vectors(vectors: List[Vector], args: argparse.Namespace) -> List[Vect
     return chosen
 
 
+def _host_global(vector: Vector) -> bool:
+    """Probes whose effect is deliberately visible beyond this replica."""
+    return bool(getattr(vector, "host_global", False))
+
+
 def run_vectors(ctx: Context, vectors: List[Vector], cleanup: bool = False) -> List[dict]:
     records: List[dict] = []
     for vector in vectors:
-        if vector.severity == "info" and not ctx.safe and getattr(vector, "host_global", False):
+        print(f"[{vector.id:>3}] {vector.title} ...", flush=True)
+        if ctx.safe and _host_global(vector):
             result = Result(Status.SKIP, "host-global probe; re-run without --safe")
         else:
-            print(f"[{vector.id:>3}] {vector.title} ...", flush=True)
             try:
                 if cleanup:
                     if hasattr(vector, "cleanup"):
@@ -598,8 +603,8 @@ def _add_probe_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--state-dir", dest="state_dir", help="agent state dir (default: auto-discovered)")
     p.add_argument("--policy", help="path to the sandbox policy file")
     p.add_argument("--workspace", help="project/workspace path (default: auto-discovered)")
-    p.add_argument("--safe", action="store_true", help="skip host-global probes")
-    p.add_argument("--skip-safe", action="store_true", help="alias for --safe filtering")
+    p.add_argument("--safe", action="store_true", help="SKIP host-global probes (visible in the report)")
+    p.add_argument("--skip-safe", action="store_true", help="exclude host-global probes from the run entirely")
     p.add_argument("--arm", action="store_true", help="arm destructive/exploit vectors")
     p.add_argument("--vector", help="comma-separated vector ids to run")
     p.add_argument("--min-severity", choices=list(SEVERITY_ORDER), help="only at or above this severity")

@@ -142,5 +142,35 @@ class AutomationTests(unittest.TestCase):
             self.assertIn("IMPROVED", out.stdout)
 
 
+class SafeGateTests(unittest.TestCase):
+    """--safe must SKIP host-global vectors (V8 arms a host-side trap)."""
+
+    def test_safe_skips_host_global_vector(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = run(
+                "run", "--replica", "--safe", "--vector", "V8",
+                "--in", td, "--out", td,
+            )
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            self.assertIn("[V8]", out.stdout.replace("[ V8]", "[V8]"))
+            self.assertIn("host-global", out.stdout)
+
+    def test_skip_safe_excludes_host_global_vector(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = run(
+                "run", "--replica", "--skip-safe", "--vector", "V8",
+                "--in", td, "--out", td,
+            )
+            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+            self.assertIn("no vectors selected", out.stderr)
+
+    def test_v8_is_tagged_host_global(self):
+        sys.path.insert(0, os.path.join(ROOT, "sandeval"))
+        from runner import discover_vectors  # noqa: E402
+
+        vectors = {v.id: v for v in discover_vectors(os.path.join(ROOT, "vectors"))}
+        self.assertTrue(getattr(vectors["V8"], "host_global", False))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
