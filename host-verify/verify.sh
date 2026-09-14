@@ -13,7 +13,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKSPACE="${SANDEVAL_WORKSPACE:-/workspace}"
+WORKSPACE="${SANDEVAL_WORKSPACE:-}"
+if [ -z "$WORKSPACE" ]; then
+  if [ -d /workspace ]; then WORKSPACE=/workspace; else WORKSPACE="$(pwd)"; fi
+fi
 HOME_DIR="${HOME:-/home/$(id -un 2>/dev/null || echo nobody)}"
 MODE="${1:-check}"
 findings=0
@@ -47,25 +50,40 @@ done
 # --- xattr markers written from inside the sandbox (V1, V2, prior PoCs) ----- #
 say ""
 say "xattr markers on host files:"
-python3 - "$WORKSPACE" <<'PY'
+python3 - "$WORKSPACE" "$HOME_DIR" <<'PY'
 import os, sys
-workspace = sys.argv[1]
-targets = []
-for base in ("/etc/resolv.conf", "/etc/hostname", "/home", workspace):
-    if os.path.isfile(base):
-        targets.append(base)
-# walk the user's Local tree and the workspace, but tolerate denials
-for base in (os.path.join(os.path.expanduser("~"), "Local"), workspace):
-    for root, _d, files in os.walk(base):
-        for f in files:
-            p = os.path.join(root, f)
-            if not os.path.islink(p):
-                targets.append(p)
-        if len(targets) > 4000:
-            break
+workspace, home = sys.argv[1], sys.argv[2]
+extra = [p for p in os.environ.get("SANDEVAL_HOST_FILES", "").split(":") if p]
+candidates = ["/etc/resolv.conf", "/etc/hostname", "/etc/hosts"] + extra
+
+
+def walk(root, depth=0, max_depth=3):
+    if depth > max_depth:
+        return
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    for name in entries:
+        path = os.path.join(root, name)
+        try:
+            if os.path.islink(path):
+                continue
+            if os.path.isfile(path):
+                yield path
+            elif os.path.isdir(path):
+                yield from walk(path, depth + 1, max_depth)
+        except OSError:
+            continue
+
+
+for root in (home, workspace):
+    if os.path.isdir(root):
+        candidates.extend(walk(root))
+
 prefixes = ("user.sandeval", "user.SANDEVAL", "user.poc")
 hits = 0
-for path in targets:
+for path in candidates[:20000]:
     try:
         names = os.listxattr(path)
     except OSError:
@@ -120,25 +138,60 @@ if [ "$MODE" = "--clean" ]; then
   say "cleaning:"
   rm -f "$proof" "$WORKSPACE/HOST-passwd.txt" "$HOME_DIR/HOST-RCE-marker" /tmp/HOST-RCE-marker \
         /tmp/SANDEVAL_POC /tmp/SANDEVAL_POC_V2 /dev/shm/SANDEVAL_POC
-  python3 - "$WORKSPACE" <<'PY'
+  python3 - "$WORKSPACE" "$HOME_DIR" <<'PY'
 import os, sys
-workspace = sys.argv[1]
+workspace, home = sys.argv[1], sys.argv[2]
+extra = [p for p in os.environ.get("SANDEVAL_HOST_FILES", "").split(":") if p]
 prefixes = ("user.sandeval", "user.SANDEVAL", "user.poc")
-removed = 0
-for base in (workspace, os.path.join(os.path.expanduser("~"), "Local")):
-    for root, _d, files in os.walk(base):
-        for f in files:
-            p = os.path.join(root, f)
-            try:
-                for name in os.listxattr(p):
-                    if name.startswith(prefixes):
-                        try:
-                            os.removexattr(p, name)
-                            removed += 1
-                        except OSError:
-                            pass
-            except OSError:
+
+
+def walk(root, depth=0, max_depth=3):
+    if depth > max_depth:
+        return
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    for name in entries:
+        path = os.path.join(root, name)
+        try:
+            if os.path.islink(path):
                 continue
+            if os.path.isfile(path):
+                yield path
+            elif os.path.isdir(path):
+                yield from walk(path, depth + 1, max_depth)
+        except OSError:
+            continue
+
+
+roots = [home, workspace] + [p for p in extra if os.path.isdir(p)]
+removed = 0
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    for path in walk(root):
+        try:
+            for name in os.listxattr(path):
+                if name.startswith(prefixes):
+                    try:
+                        os.removexattr(path, name)
+                        removed += 1
+                    except OSError:
+                        pass
+        except OSError:
+            continue
+for path in extra + ["/etc/resolv.conf", "/etc/hostname"]:
+    try:
+        for name in os.listxattr(path):
+            if name.startswith(prefixes):
+                try:
+                    os.removexattr(path, name)
+                    removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        continue
 print(f"  removed {removed} xattr marker(s)")
 PY
   say "  done"

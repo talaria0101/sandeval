@@ -165,16 +165,85 @@ def discover_host_files(extra: Iterable[str], ctx: Context) -> List[str]:
     return (owned + others)[:40]
 
 
+def _mount_points() -> List[str]:
+    """Candidate mount points, shallowest first, from /proc/self/mountinfo.
+
+    Used to find the agent's state directory on a machine whose layout differs
+    from the one this harness was written on: the directory is whichever mount
+    holds a ``policy.toml``.
+    """
+    points: List[str] = []
+    try:
+        with open("/proc/self/mountinfo") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) > 4:
+                    mount = fields[4]
+                    if mount.startswith("/") and mount.count("/") <= 3:
+                        points.append(mount)
+    except OSError:
+        pass
+    points.sort(key=len)
+    return points
+
+
+def discover_state_dir(explicit: Optional[str]) -> str:
+    """Locate the agent state directory without assuming ``/state``."""
+    if explicit:
+        return explicit
+    env = os.environ.get("SANDEVAL_STATE")
+    if env:
+        return env
+    if os.path.exists("/state/policy.toml"):
+        return "/state"
+    for mount in _mount_points():
+        if os.path.exists(os.path.join(mount, "policy.toml")):
+            return mount
+    return "/state"
+
+
+def discover_policy_file(explicit: Optional[str], state_dir: str) -> Optional[str]:
+    if explicit:
+        return explicit
+    env = os.environ.get("SANDEVAL_POLICY")
+    if env:
+        return env if os.path.exists(env) else None
+    candidate = os.path.join(state_dir, "policy.toml")
+    if os.path.exists(candidate):
+        return candidate
+    for mount in _mount_points():
+        candidate = os.path.join(mount, "policy.toml")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def discover_workspace(explicit: Optional[str], state_dir: str) -> str:
+    """Locate the project directory without assuming ``/workspace``."""
+    if explicit:
+        return os.path.abspath(explicit)
+    env = os.environ.get("SANDEVAL_WORKSPACE")
+    if env:
+        return os.path.abspath(env)
+    if os.path.isdir("/workspace"):
+        return "/workspace"
+    # fall back to a writable directory that is not the state dir
+    for candidate in (os.getcwd(), "/workspace"):
+        if os.path.isdir(candidate) and os.path.realpath(candidate) != os.path.realpath(state_dir):
+            return os.path.abspath(candidate)
+    return os.getcwd()
+
+
 def build_context(args: argparse.Namespace) -> Context:
     in_dir = os.path.abspath(args.in_dir or os.environ.get("SANDEVAL_IN") or os.getcwd())
     if not os.path.isdir(in_dir):
         raise SystemExit(f"--in {in_dir!r} is not a directory")
-    out_dir = os.path.abspath(discover_out_dir(args.out_dir))
-    state_dir = args.state_dir or os.environ.get("SANDEVAL_STATE") or "/state"
-    policy_file = args.policy or os.environ.get("SANDEVAL_POLICY")
-    if not policy_file:
-        candidate = os.path.join(state_dir, "policy.toml")
-        policy_file = candidate if os.path.exists(candidate) else None
+    out_dir = os.path.abspath(
+        args.out_dir or os.environ.get("SANDEVAL_OUT") or discover_out_dir(None)
+    )
+    state_dir = discover_state_dir(args.state_dir)
+    policy_file = discover_policy_file(args.policy, state_dir)
+    workspace = discover_workspace(args.workspace, state_dir)
     scratch = tempfile.mkdtemp(prefix=".sandeval-", dir=in_dir)
     ctx = Context(
         in_dir=in_dir,
@@ -184,9 +253,9 @@ def build_context(args: argparse.Namespace) -> Context:
         arm=args.arm,
         verbose=args.verbose,
         canary=args.canary or os.environ.get("SANDEVAL_CANARY") or os.environ.get("LANDSCAN_CANARY"),
-        seed=args.seed,
+        seed=args.seed or os.environ.get("SANDEVAL_SEED"),
         host_files=[],
-        workspace=args.workspace,
+        workspace=workspace,
         state_dir=state_dir,
         policy_file=policy_file,
         log_fn=(lambda m: print("    " + m)) if args.verbose else (lambda _m: None),
@@ -526,9 +595,9 @@ def _add_probe_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--replica", action="store_true", help="required: I am in a disposable replica")
     p.add_argument("--in", dest="in_dir", help="in-policy directory (default: $PWD)")
     p.add_argument("--out", dest="out_dir", help="out-of-policy directory (default: auto)")
-    p.add_argument("--state-dir", dest="state_dir", help="agent state dir (default: /state)")
+    p.add_argument("--state-dir", dest="state_dir", help="agent state dir (default: auto-discovered)")
     p.add_argument("--policy", help="path to the sandbox policy file")
-    p.add_argument("--workspace", default="/workspace", help="project/workspace path")
+    p.add_argument("--workspace", help="project/workspace path (default: auto-discovered)")
     p.add_argument("--safe", action="store_true", help="skip host-global probes")
     p.add_argument("--skip-safe", action="store_true", help="alias for --safe filtering")
     p.add_argument("--arm", action="store_true", help="arm destructive/exploit vectors")

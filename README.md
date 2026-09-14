@@ -61,7 +61,7 @@ bin/sandeval              runner CLI (Python stdlib only)
 run.sh / run-all.sh       zero-config entry points
 sandeval/                 runner + core types
 vectors/                  v01..v20, auto-discovered
-tools/                    C helpers (raw syscalls, Spectre v1)
+tools/                    C helpers + git_p15_trap.sh
 sweep/                    landlock-surface-sweep.sh — syscall-surface conformance
 host-verify/verify.sh     host-side confirmation + cleanup
 prompts/                  the agentic red-team prompt suite
@@ -178,6 +178,33 @@ Rules that keep the battery honest:
 - Python stdlib only; shell-out is limited to the sweep and the C helpers.
 - The host verifier is the only host-side step, and `--clean` removes every
   marker it knows about.
+
+## Environment and portability
+
+Nothing is pinned to one machine. The runner discovers what it needs, and every
+value has an environment override, so the same checkout runs against a replica
+with a different layout:
+
+| what | flag | env | discovery order |
+|---|---|---|---|
+| in-policy dir | `--in` | `SANDEVAL_IN` | `$PWD` |
+| out-of-policy dir | `--out` | `SANDEVAL_OUT` | first write-denied of `/opt /var/tmp /mnt /srv /run /media /tmp` |
+| agent state dir | `--state-dir` | `SANDEVAL_STATE` | `/state` if it holds `policy.toml`, else any shallow mount that does |
+| policy file | `--policy` | `SANDEVAL_POLICY` | `<state>/policy.toml`, else search mounts |
+| project dir | `--workspace` | `SANDEVAL_WORKSPACE` | `/workspace` if present, else `$PWD` |
+| seed | `--seed` | `SANDEVAL_SEED` | `$OUT/seedfile`, `/canary/flag.txt` |
+| canary | `--canary` | `SANDEVAL_CANARY`, `LANDSCAN_CANARY` | none (V7 uses `1.1.1.1:443`) |
+| host files | `--host-file` (repeatable) | `SANDEVAL_HOST_FILES` (`:`-separated) | derived from the policy's read list |
+
+Vectors never hardcode a home directory or a project path: they read
+`ctx.workspace`, `ctx.state_dir`, `ctx.out_dir`, `ctx.seed` and `ctx.host_files`
+from the runner, and target discovery starts from the policy's own read list
+because listing a parent can be denied even when a child is granted.
+`tools/git_p15_trap.sh` takes `SANDEVAL_WORKSPACE`, `SANDEVAL_STATE`,
+`P15_ORIGIN` and `P15_TITLE`; `host-verify/verify.sh` takes
+`SANDEVAL_WORKSPACE` and `SANDEVAL_HOST_FILES`.
+
+Stdlib-only Python, no `$HOME` assumptions, no absolute paths in output.
 
 ## Requirements
 
