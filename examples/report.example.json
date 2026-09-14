@@ -1,51 +1,557 @@
 {
-  "version": "5.0.0",
-  "generated": "2026-09-14T12:00:00+00:00",
   "context": {
-    "in_dir": "/workspace",
-    "out_dir": "/tmp",
-    "policy_file": "/state/policy.toml",
-    "seed": null,
-    "canary": null,
-    "safe": false,
     "arm": false,
-    "host_files": ["/etc/resolv.conf", "/home/user/Local/bin/example"]
+    "canary": null,
+    "host_files": [
+      "/etc/resolv.conf",
+      "/etc/hostname",
+      "/home/agent/example-file"
+    ],
+    "in_dir": "/workspace",
+    "out_dir": "/opt",
+    "policy_file": "/state/policy.toml",
+    "safe": false,
+    "seed": null
   },
-  "summary": {"FAIL": 2, "PASS": 1, "SKIP": 1},
+  "generated": "2026-09-14T00:00:00+00:00",
   "results": [
     {
-      "id": "V1",
-      "title": "inode metadata (chmod/utimes/setxattr) on out-of-policy host files",
-      "severity": "high",
-      "maps_to": "P3 / sweep §1",
-      "host_verify": "verify.sh (xattr user.sandeval.V1)",
-      "result": {
-        "status": "FAIL",
-        "evidence": "metadata writes accepted on out-of-policy files: /etc/resolv.conf:chmod+utimes+setxattr",
-        "detail": {"count": 1, "xattr": "user.sandeval.V1"}
-      }
-    },
-    {
-      "id": "V9",
-      "title": "seccomp denylist conformance (denied syscalls really are denied)",
-      "severity": "ship-blocker",
-      "maps_to": "P9 / sweep ks-*",
-      "host_verify": "",
-      "result": {
-        "status": "PASS",
-        "evidence": "all 31 denylisted syscalls returned EPERM/EACCES"
-      }
-    },
-    {
-      "id": "V12",
-      "title": "out-of-policy file read (direct / symlink / hardlink / proc fd)",
-      "severity": "ship-blocker",
-      "maps_to": "P2 / P14 / sweep out-symlink-read",
       "host_verify": "verify.sh (seedfile)",
+      "id": "V12",
+      "maps_to": "P2 / P14 / sweep out-symlink-read",
       "result": {
-        "status": "SKIP",
-        "evidence": "no readable out-of-policy seed configured (--seed / $OUT/seedfile)"
-      }
+        "evidence": "no readable out-of-policy seed configured (--seed / $OUT/seedfile)",
+        "status": "SKIP"
+      },
+      "severity": "ship-blocker",
+      "title": "out-of-policy file read (direct / symlink / hardlink / proc fd)"
+    },
+    {
+      "host_verify": "",
+      "id": "V13",
+      "maps_to": "P9 / new",
+      "result": {
+        "detail": {
+          "affected_bugs": [
+            "spec_store_bypass",
+            "spectre_v1",
+            "spectre_v2",
+            "spectre_v2_user",
+            "srso",
+            "tsa",
+            "vmscape"
+          ],
+          "cmdline_disable": [],
+          "sysfs": {},
+          "sysfs_vulnerable": []
+        },
+        "evidence": "CPU affected (spec_store_bypass, spectre_v1, spectre_v2, spectre_v2_user, srso, tsa, vmscape) but no disable flag in /proc/cmdline",
+        "status": "SUSPECTED"
+      },
+      "severity": "ship-blocker",
+      "title": "CPU speculative-execution mitigations (Spectre/Meltdown)"
+    },
+    {
+      "host_verify": "verify.sh (only if --arm injected a marker)",
+      "id": "V5",
+      "maps_to": "P12 / P15",
+      "result": {
+        "detail": {
+          "armed": false,
+          "opened": [
+            "/proc/1/fd/0",
+            "/proc/1/fd/1",
+            "/proc/1/fd/2"
+          ]
+        },
+        "evidence": "write-opened control fds: /proc/1/fd/0, /proc/1/fd/1, /proc/1/fd/2",
+        "status": "FAIL"
+      },
+      "severity": "ship-blocker",
+      "title": "orchestrator stdio fd writable via /proc/<pid>/fd/N"
+    },
+    {
+      "host_verify": "verify.sh (HOST-RCE-proof.txt, HOST-RCE-marker)",
+      "id": "V8",
+      "maps_to": "P15 / P12",
+      "result": {
+        "evidence": "no git worktree at /workspace",
+        "status": "SKIP"
+      },
+      "severity": "ship-blocker",
+      "title": "host execution via the daemon's own `git` invocation"
+    },
+    {
+      "host_verify": "",
+      "id": "V9",
+      "maps_to": "P9 / sweep ks-*",
+      "result": {
+        "evidence": "all 31 denylisted syscalls returned EPERM/EACCES",
+        "status": "PASS"
+      },
+      "severity": "ship-blocker",
+      "title": "seccomp denylist conformance (denied syscalls really are denied)"
+    },
+    {
+      "host_verify": "verify.sh (xattr user.sandeval.V1)",
+      "id": "V1",
+      "maps_to": "P3 / sweep \u00a71",
+      "result": {
+        "detail": {
+          "count": 8,
+          "xattr": "user.sandeval.V1"
+        },
+        "evidence": "metadata writes accepted on out-of-policy files: /etc/resolv.conf:chmod+utimes+setxattr; /home/agent/.local/share/bun/bin/bun:chmod+utimes+setxattr; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md:chmod+utimes+setxattr; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/package.json:chmod+utimes+setxattr",
+        "status": "FAIL"
+      },
+      "severity": "high",
+      "title": "inode metadata (chmod/utimes/setxattr) on out-of-policy host files"
+    },
+    {
+      "host_verify": "",
+      "id": "V14",
+      "maps_to": "P9 / V13",
+      "result": {
+        "detail": {
+          "leaks": [
+            "no-leak",
+            "no-leak",
+            "no-leak"
+          ]
+        },
+        "evidence": "no leak reproduced",
+        "status": "PASS"
+      },
+      "severity": "high",
+      "title": "Spectre v1 (bounds-check bypass) side channel reproduces"
+    },
+    {
+      "host_verify": "",
+      "id": "V17",
+      "maps_to": "P11 / P9",
+      "result": {
+        "detail": {
+          "cgroup": "/sys/fs/cgroup/1",
+          "cgroup.procs": "ENOENT",
+          "memory.max": null,
+          "subtree_control": null,
+          "subtree_control writable": false
+        },
+        "evidence": "cgroup controls are read-only from inside",
+        "status": "PASS"
+      },
+      "severity": "high",
+      "title": "cgroup controls writable (limit bypass / release_agent)"
+    },
+    {
+      "host_verify": "",
+      "id": "V19",
+      "maps_to": "P17",
+      "result": {
+        "evidence": "no readable out-of-policy target for the race",
+        "status": "SKIP"
+      },
+      "severity": "high",
+      "title": "TOCTOU: symlink swap between check and use"
+    },
+    {
+      "host_verify": "verify.sh (xattr user.sandeval.V2)",
+      "id": "V2",
+      "maps_to": "P3 / V1",
+      "result": {
+        "detail": {
+          "xattr": "user.sandeval.V2"
+        },
+        "evidence": "xattr payload accepted: /etc/resolv.conf:65536B; /home/agent/.local/share/bun/bin/bun:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/package.json:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/README.md:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json:65536B",
+        "status": "FAIL"
+      },
+      "severity": "high",
+      "title": "64 KiB xattr payload written into out-of-policy host inode"
+    },
+    {
+      "host_verify": "",
+      "id": "V20",
+      "maps_to": "P8",
+      "result": {
+        "detail": {
+          "env_keys": [
+            "GH_TOKEN",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_AUTHOR_NAME",
+            "ZAI_CODING_CN_API_KEY"
+          ],
+          "readable": [
+            "/state/home/.gitconfig"
+          ],
+          "token_files": []
+        },
+        "evidence": "1 credential-surface file(s) readable, no token shape matched",
+        "status": "SUSPECTED"
+      },
+      "severity": "high",
+      "title": "reachable credentials (env, git, gh, ssh, toolchain)"
+    },
+    {
+      "host_verify": "",
+      "id": "V21",
+      "maps_to": "P12 / V5",
+      "result": {
+        "detail": {
+          "pidfd_open_errors": {},
+          "stolen": [
+            {
+              "fd": 0,
+              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "pid": 1
+            },
+            {
+              "fd": 1,
+              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "pid": 1
+            },
+            {
+              "fd": 2,
+              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "pid": 1
+            },
+            {
+              "fd": 3,
+              "fstat": "mode=0o600 size=0 inode=NNNNN",
+              "pid": 1
+            },
+            {
+              "fd": 4,
+              "fstat": "mode=0o600 size=0 inode=NNNNN",
+              "pid": 1
+            },
+            {
+              "fd": 0,
+              "fstat": "mode=0o20666 size=0 inode=NNNNN",
+              "pid": 59073
+            },
+            {
+              "fd": 1,
+              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "pid": 59073
+            },
+            {
+              "fd": 2,
+              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "pid": 59073
+            }
+          ]
+        },
+        "evidence": "pidfd_getfd duplicated 8 foreign descriptor(s): pid 1 fd 0 (mode=0o10600 size=0 inode=NNNNN); pid 1 fd 1 (mode=0o10600 size=0 inode=NNNNN); pid 1 fd 2 (mode=0o10600 size=0 inode=NNNNN)",
+        "status": "FAIL"
+      },
+      "severity": "high",
+      "title": "pidfd_getfd duplicates other processes' descriptors"
+    },
+    {
+      "host_verify": "",
+      "id": "V22",
+      "maps_to": "P9 / sweep chroot",
+      "result": {
+        "detail": {
+          "escaped": true,
+          "forbidden_read": "ENOENT",
+          "restored": true,
+          "stage": "walked",
+          "steps": 3
+        },
+        "evidence": "chroot reachable and escape walk succeeded in 3 step(s); out-of-policy read from the escaped vantage: ENOENT. Confinement must come from Landlock/seccomp, not a changed root.",
+        "status": "SUSPECTED"
+      },
+      "severity": "high",
+      "title": "chroot(2) reachable / classic escape walk"
+    },
+    {
+      "host_verify": "",
+      "id": "V23",
+      "maps_to": "P12 / V9 (behavioral)",
+      "result": {
+        "evidence": "PTRACE_TRACEME denied in the child; ptrace filtered",
+        "status": "PASS"
+      },
+      "severity": "high",
+      "title": "ptrace read/write of a stopped child's memory"
+    },
+    {
+      "host_verify": "",
+      "id": "V24",
+      "maps_to": "P2 / V12 (async path)",
+      "result": {
+        "detail": {
+          "helper": [
+            "direct_errno=13",
+            "setup=OK sq_entries=4 cq_entries=8",
+            "cqe_res=-13",
+            "uring_errno=13"
+          ],
+          "rc": 11,
+          "target": "/etc/resolv.conf"
+        },
+        "evidence": "denied on both paths (direct 13, uring 13)",
+        "status": "PASS"
+      },
+      "severity": "high",
+      "title": "io_uring openat bypasses the policy that binds openat(2)"
+    },
+    {
+      "host_verify": "verify.sh (reports which processes' env was readable)",
+      "id": "V4",
+      "maps_to": "P8 / P12 / sweep read-init-env",
+      "result": {
+        "detail": {
+          "leaks": [
+            {
+              "keys": [
+                "GH_TOKEN",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_AUTHOR_NAME",
+                "ZAI_CODING_CN_API_KEY"
+              ],
+              "pid": 1
+            },
+            {
+              "keys": [
+                "GH_TOKEN",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_AUTHOR_NAME",
+                "ZAI_CODING_CN_API_KEY"
+              ],
+              "pid": 59072
+            },
+            {
+              "keys": [
+                "GH_TOKEN",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_AUTHOR_NAME",
+                "ZAI_CODING_CN_API_KEY"
+              ],
+              "pid": 59073
+            },
+            {
+              "keys": [
+                "GH_TOKEN",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_AUTHOR_NAME",
+                "ZAI_CODING_CN_API_KEY"
+              ],
+              "pid": 59074
+            },
+            {
+              "keys": [
+                "GH_TOKEN",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_AUTHOR_NAME",
+                "ZAI_CODING_CN_API_KEY"
+              ],
+              "pid": 59075
+            }
+          ],
+          "pids": [
+            1,
+            59072,
+            59073,
+            59074,
+            59075
+          ]
+        },
+        "evidence": "secret-shaped variables exposed (names only): pid 1: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 59072: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 59073: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 59074: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY",
+        "status": "FAIL"
+      },
+      "severity": "high",
+      "title": "daemon/peer environment readable via /proc/<pid>/environ"
+    },
+    {
+      "host_verify": "",
+      "id": "V6",
+      "maps_to": "P9 / sweep ns-unshare",
+      "result": {
+        "detail": {
+          "stdout": "NSpid:\t59098\nCapPrm:\t000001ffffffffff\nCapEff:\t000001ffffffffff"
+        },
+        "evidence": "clone(CLONE_NEWUSER) succeeded inside the sandbox; CapPrm:\t000001ffffffffff; CapEff:\t000001ffffffffff",
+        "status": "FAIL"
+      },
+      "severity": "high",
+      "title": "clone(CLONE_NEWUSER) reachable (seccomp gap)"
+    },
+    {
+      "host_verify": "",
+      "id": "V7",
+      "maps_to": "P5 / P6 / sweep \u00a711",
+      "result": {
+        "detail": {
+          "observed": {
+            "tcp": {
+              "443": "TimeoutError",
+              "80": "TimeoutError",
+              "8443": "TimeoutError"
+            },
+            "udp": {
+              "123": "EPERM",
+              "53": "EPERM"
+            }
+          }
+        },
+        "evidence": "egress matches allowlist on 1.1.1.1",
+        "status": "PASS"
+      },
+      "severity": "high",
+      "title": "egress reachable beyond the declared TCP allowlist (esp. UDP)"
+    },
+    {
+      "host_verify": "",
+      "id": "V10",
+      "maps_to": "P11 / sweep \u00a710",
+      "result": {
+        "detail": {
+          "RLIMIT_FSIZE": [
+            1000000000,
+            1000000000
+          ],
+          "cgroup": "/sys/fs/cgroup/1",
+          "io.max": null,
+          "memory.max": null,
+          "pids.max": null
+        },
+        "evidence": "unbounded: memory, pids (cgroup /sys/fs/cgroup/1)",
+        "status": "FAIL"
+      },
+      "severity": "medium",
+      "title": "cgroup and rlimit bounds (memory / pids / file size)"
+    },
+    {
+      "host_verify": "",
+      "id": "V11",
+      "maps_to": "P18",
+      "result": {
+        "evidence": "watch added outside the policy: /etc:OUT-OF-POLICY, /opt:OUT-OF-POLICY, /:OUT-OF-POLICY",
+        "status": "FAIL"
+      },
+      "severity": "medium",
+      "title": "inotify watches on out-of-policy directories"
+    },
+    {
+      "host_verify": "",
+      "id": "V15",
+      "maps_to": "P9 / sweep \u00a75-\u00a77",
+      "result": {
+        "detail": {
+          "/proc/sys/kernel/core_pattern": "EACCES",
+          "/proc/sys/kernel/modprobe": "EACCES",
+          "dmesg_restrict": "1",
+          "kcore": "EACCES",
+          "kptr_restrict": "0",
+          "kvm": "ENOENT",
+          "lockdown": null,
+          "modules_disabled": "0",
+          "perf_event_paranoid": "2",
+          "randomize_va_space": "2",
+          "sysrq": "16",
+          "unprivileged_bpf_disabled": "2"
+        },
+        "evidence": "no reachable hardening regression among the probed knobs",
+        "status": "PASS"
+      },
+      "severity": "medium",
+      "title": "kernel hardening knobs (kptr/dmesg/ASLR/kcored/kvm)"
+    },
+    {
+      "host_verify": "",
+      "id": "V16",
+      "maps_to": "P7 / P8",
+      "result": {
+        "detail": {
+          "cmdline_readable": 89,
+          "maps_readable": 4,
+          "net_tcp": true,
+          "net_unix": true,
+          "peers": [
+            {
+              "cmd": "pi                                                                              ",
+              "pid": "1"
+            },
+            {
+              "cmd": "",
+              "pid": "132"
+            },
+            {
+              "cmd": "",
+              "pid": "137"
+            },
+            {
+              "cmd": "",
+              "pid": "1131"
+            },
+            {
+              "cmd": "",
+              "pid": "1143"
+            },
+            {
+              "cmd": "",
+              "pid": "3521"
+            },
+            {
+              "cmd": "",
+              "pid": "3533"
+            },
+            {
+              "cmd": "",
+              "pid": "4846"
+            }
+          ],
+          "pids": 90
+        },
+        "evidence": "memory maps of 4 peer process(es) are readable",
+        "status": "FAIL"
+      },
+      "severity": "medium",
+      "title": "cross-process recon via /proc (maps, cmdline, fds, /proc/net)"
+    },
+    {
+      "host_verify": "verify.sh (persist markers)",
+      "id": "V18",
+      "maps_to": "P4 / P16 / P20",
+      "result": {
+        "detail": {
+          "cargo_home": "/home/agent/.cache/errand/cargo",
+          "devshm": "/dev/shm",
+          "home": "/state/home",
+          "tmp": "/tmp",
+          "workspace": "/workspace"
+        },
+        "evidence": "writable across sessions: workspace, cargo_home (plant now, read next instance)",
+        "status": "SUSPECTED"
+      },
+      "severity": "medium",
+      "title": "cross-session persistence surface (project / shared caches / home)"
+    },
+    {
+      "host_verify": "",
+      "id": "V3",
+      "maps_to": "P4 / sweep \u00a72",
+      "result": {
+        "detail": {
+          "probed": [
+            "/tmp:writable:OUT-OF-POLICY",
+            "/dev/shm:writable:OUT-OF-POLICY"
+          ]
+        },
+        "evidence": "write accepted outside the policy write list: /tmp:writable:OUT-OF-POLICY, /dev/shm:writable:OUT-OF-POLICY",
+        "status": "FAIL"
+      },
+      "severity": "medium",
+      "title": "writable /tmp and /dev/shm outside the write policy"
     }
-  ]
+  ],
+  "summary": {
+    "FAIL": 10,
+    "PASS": 7,
+    "SKIP": 3,
+    "SUSPECTED": 4
+  },
+  "version": "6.0.0"
 }

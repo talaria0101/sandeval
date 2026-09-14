@@ -25,8 +25,14 @@ jobs:
           bash -n run-all.sh
       - name: harness self-tests
         run: python3 tests/test_harness.py
+      - name: sweep engine self-tests
+        run: bash tests/run-tests.sh
       - name: vector catalogue
         run: python3 bin/sandeval list
+      - name: catalogue matches JSON output
+        run: python3 bin/sandeval list --json "$RUNNER_TEMP/catalogue.json"
+      - name: example report validates against the schema
+        run: python3 -c "import json; d=json.load(open('examples/report.example.json')); assert set(d) >= {'version','generated','context','summary','results'}"
       - name: smoke run against temp dirs
         run: |
           python3 bin/sandeval run --replica --vector V15,V17 \
