@@ -30,19 +30,21 @@
 #   "…TOKEN=…" values redacted (baselines are committed artifacts).
 #
 # USAGE
-#   landlock-surface-sweep.sh [opts] <in-policy-dir> <outside-policy-dir>
-#     --replica        acknowledge disposable-replica context (required)
+#   landlock-surface-sweep.sh --replica [IN] [OUT] [opts]   # everything else is automatic
+#     IN   optional: defaults to $PWD (or LANDSCAN_IN)
+#     OUT  optional: auto-discovered — first existing write-denied dir
+#          (candidates: /opt /var/tmp /mnt /srv /run /media /tmp), else /tmp
+#     --safe           skip host-global probes (sysrq 'h', swapon, clock_settime)
+#     --adopt          bless this run's verdicts as the expected baseline (kills
+#                      platform-shape noise on future runs)
+#     --baseline FILE  default: auto-managed .landscan-state/latest.tsv in $PWD
+#     --check FILE     default: auto-diffs against the previous run's baseline
+#     --expect FILE    default: .landscan-state/expect.tsv when present
 #     -v               echo each probe command
-#     --baseline FILE  save verdicts (TSV) for regression tracking
-#     --check FILE     diff against earlier baseline (bailey fix tracking)
-#     --expect FILE    per-check overrides, one "name deny|allow|info" per line
-#   Env: LANDSCAN_CANARY=host:port   reachable host for egress channel map
-#        LANDSCAN_FILL_MB=2048       disk-fill probe size
-#        LANDSCAN_MEMHOG_MB=6144     memory probe size (config says 4g)
-#        LANDSCAN_SYSRQ=1            opt-in: SysRq 'h' write probe (safe)
-#        LANDSCAN_SWAP=1             opt-in: swapon probe (host-global if allowed!)
-#        LANDSCAN_TIME=1             opt-in: clock_settime probe (nudges µs forward)
-#        LANDSCAN_PIDS_PROBE=N       force pids-probe ceiling (else cgroup/dflt 600)
+#   Env overrides: LANDSCAN_IN OUT STATE SAFE CANARY MEMHOG_MB FILL_MB PIDS_PROBE
+#   Heuristics (no flags needed): memhog = 1.25x cgroup memory.max (else 2% of
+#   RAM, clamped 256-1024MB); disk-fill = 2% of free space (64-2048MB); pids
+#   ceiling from cgroup v2/v1; egress canary defaults to canary.invalid.
 #
 # EXIT: 0 all as expected · 1 unexpected/inconclusive verdicts · 2 usage/setup error
 
@@ -51,10 +53,11 @@ die(){ echo "ERROR: $*" >&2; exit 2; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 sec(){ echo; echo "=== $* ==="; }
 
-IN=""; OUT=""; BASELINE=""; CHECK=""; EXPECT=""; VERBOSE=0; REPLICA=0
+IN=""; OUT=""; BASELINE=""; CHECK=""; EXPECT=""; VERBOSE=0; REPLICA=0; SAFE=${LANDSCAN_SAFE:-0}; ADOPT=0
 usage(){ grep -m1 -A110 '^# USAGE' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do case "$1" in
   --replica) REPLICA=1;; -v|--verbose) VERBOSE=1;;
+  --safe) SAFE=1;; --adopt) ADOPT=1;;
   --baseline) [ $# -ge 2 ] || usage; BASELINE="$2"; shift;;
   --check)    [ $# -ge 2 ] || usage; CHECK="$2"; shift;;
   --expect)   [ $# -ge 2 ] || usage; EXPECT="$2"; shift;;
@@ -63,13 +66,32 @@ while [ $# -gt 0 ]; do case "$1" in
   *) if [ -z "$IN" ]; then IN="$1"; elif [ -z "$OUT" ]; then OUT="$1"; else die "unexpected argument: $1"; fi;;
 esac; shift; done
 [ "$REPLICA" = 1 ] || { echo "REFUSING: run only inside a disposable replica. Pass --replica to confirm." >&2; exit 2; }
-[ -n "$IN" ] && [ -n "$OUT" ] || usage
+# --- defaults & heuristics: zero flags beyond --replica must work ---
+STATE=${LANDSCAN_STATE:-$PWD/.landscan-state}
+[ -z "$IN" ] && IN=${LANDSCAN_IN:-$PWD}
+if [ -z "$OUT" ]; then
+  OUT=${LANDSCAN_OUT:-}
+  if [ -z "$OUT" ]; then
+    for c in /opt /var/tmp /mnt /srv /run /media /tmp; do   # auto-discover a real out-of-policy boundary
+      [ -d "$c" ] || continue
+      if ! touch "$c/.ls-probe" 2>/dev/null; then OUT=$c; break; fi
+      rm -f "$c/.ls-probe" 2>/dev/null
+    done
+    [ -z "$OUT" ] && { OUT=/tmp; echo "NOTE: no write-denied dir found — OUT=/tmp; out-of-policy checks will show allows (that IS the finding)." >&2; }
+  fi
+fi
+if [ -z "$EXPECT" ] && [ -f "$STATE/expect.tsv" ]; then EXPECT="$STATE/expect.tsv"; fi
+if [ -z "$BASELINE" ]; then
+  mkdir -p "$STATE" 2>/dev/null
+  if [ -f "$STATE/latest.tsv" ] && [ -z "$CHECK" ]; then CHECK="$STATE/latest.tsv"; fi
+  BASELINE="$STATE/latest.tsv"
+fi
 RIN=$(readlink -m "$IN" 2>/dev/null || echo "$IN")
 ROUT=$(readlink -m "$OUT" 2>/dev/null || echo "$OUT")
 case "$ROUT" in "$RIN"|"$RIN"/*) die "OUT must be outside the policy (not under IN)";; esac
 [ -d "$OUT" ] || die "outside-policy dir '$OUT' must already exist"
 
-declare -A WANT GOT DETAIL OVR=()
+declare -A WANT GOT DETAIL OVR=() OLD=()
 ORDER=(); UNEX=0; UNEXLIST=""
 if [ -n "$EXPECT" ]; then
   [ -r "$EXPECT" ] || die "--expect file '$EXPECT' not readable"
@@ -77,6 +99,7 @@ if [ -n "$EXPECT" ]; then
 fi
 if [ -n "$CHECK" ]; then
   [ -r "$CHECK" ] || die "--check baseline '$CHECK' not readable (typo? see --baseline to create one)"
+  while IFS=$'\t' read -r n g d; do [ -n "${n:-}" ] && OLD[$n]="$g"; done < "$CHECK"   # load pre-run: baseline may be overwritten after
 fi
 if [ -n "$BASELINE" ]; then
   : > "$BASELINE" || die "--baseline '$BASELINE' not writable"
@@ -145,6 +168,27 @@ kwriteback(){ # name path — write FULL current value back; writability w/o mut
   if printf '%s' "$cur" > "$p" 2>/dev/null; then rec "$n" deny allow "write-back-same-value(${#cur}B)"
   else rec "$n" deny deny "write-back refused"; fi
 }
+# heuristic resource sizing — env overrides still win
+mem_target_mb(){
+  local mm mt
+  mm=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)
+  case "$mm" in ''|max|*[!0-9]*) mm=0;; esac
+  [ "$mm" -gt 137438953472 ] 2>/dev/null && mm=0            # absurd cap = unlimited
+  if [ "$mm" -gt 0 ] 2>/dev/null; then
+    mt=$(( mm / 1048576 * 125 / 100 ))                       # 1.25x the limit: must exceed it to see the kill
+    echo $(( mt < 64 ? 64 : mt > 8192 ? 8192 : mt ))
+  else
+    mt=$(awk '/MemTotal/{print int($2/1024*0.02); exit}' /proc/meminfo 2>/dev/null)
+    echo $(( ${mt:-256} < 256 ? 256 : ${mt:-256} > 1024 ? 1024 : ${mt:-256} ))
+  fi
+}
+fill_target_mb(){
+  local av mt
+  av=$(df -k "$IN" 2>/dev/null | awk 'NR==2{print $4}')
+  case "$av" in ''|*[!0-9]*) av=0;; esac
+  mt=$(( av / 512 ))                                         # ~2% of free, in MB
+  echo $(( mt < 64 ? 64 : mt > 2048 ? 2048 : mt ))
+}
 
 # ---------- embedded C helper: probes needing raw syscalls ----------
 mkdir -p "$SCRATCH" || echo "WARNING: cannot create scratch dir '$SCRATCH'" >&2
@@ -174,6 +218,14 @@ if have cc || have gcc; then
 #include <sys/prctl.h>
 #include <termios.h>
 #include <linux/loop.h>
+#include <linux/fs.h>
+#include <linux/dm-ioctl.h>
+#include <linux/kvm.h>
+#include <linux/input.h>
+#include <linux/fb.h>
+#include <linux/if_tun.h>
+#include <scsi/sg.h>
+#include <net/if.h>
 #if defined(__i386__)||defined(__x86_64__)
 #include <sys/io.h>
 #endif
@@ -185,6 +237,11 @@ if have cc || have gcc; then
 #ifndef FICLONE
 #define FICLONE _IOW(0x94, 9, int)
 #endif
+/* raw btrfs ioctls (linux/btrfs.h is not always installed; layout is fixed ABI):
+ * struct btrfs_ioctl_vol_args { s64 fd; char name[4088]; } = 4096 bytes */
+struct btrfs_vol_args_s { long long fd; char name[4088]; };
+#define BTRFS_IOC_SUBVOL_CREATE_S _IOW(0x91, 14, struct btrfs_vol_args_s)
+#define BTRFS_IOC_SNAP_CREATE_S  _IOW(0x91, 15, struct btrfs_vol_args_s)
 static void rep(const char*v,const char*d){printf("%s %s\n",v,d);}
 /* errno-aware classification: EPERM/EACCES = policy/cap deny; anything else
  * (ENOENT, EINVAL, ENOSYS, EOPNOTSUPP, EFAULT, ...) = cannot attribute to
@@ -364,6 +421,87 @@ int main(int argc,char**argv){
     ts.tv_nsec=(ts.tv_nsec|0x3F)+1;
     if(ts.tv_nsec>=1000000000L){ts.tv_nsec-=1000000000L;ts.tv_sec+=1;}
     if(clock_settime(CLOCK_REALTIME,&ts)==0)rep("ALLOW","clock-settable(CAP_SYS_TIME)");else vcls(-1,"clock_settime");
+  }else if(!strcmp(op,"subvol")&&argc==3){ /* raw BTRFS_IOC_SUBVOL_CREATE: the mkdir-hook-bypass class, no userspace tool needed */
+    int d=open(argv[2],O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if(d<0){vcls(d,"open-parent");return 0;}
+    struct btrfs_vol_args_s a={0};
+    snprintf(a.name,sizeof a.name,"ls%d",(int)getpid()); /* unique per run: idempotent */
+    long r=ioctl(d,BTRFS_IOC_SUBVOL_CREATE_S,&a);
+    if(r==0)rep("ALLOW","CRITICAL subvol-created(mkdir-hook-bypass?)");else vcls(r,"BTRFS_IOC_SUBVOL_CREATE");
+    close(d);
+  }else if(!strcmp(op,"snap")&&argc==4){ /* raw BTRFS_IOC_SNAP_CREATE: src subvol -> name inside dst-parent */
+    int s=open(argv[2],O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if(s<0){vcls(s,"open-src-subvol");return 0;}
+    int d=open(argv[3],O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    if(d<0){vcls(d,"open-dst-parent");close(s);return 0;}
+    struct btrfs_vol_args_s a={0};
+    a.fd=s; snprintf(a.name,sizeof a.name,"ls%d",(int)getpid());
+    long r=ioctl(d,BTRFS_IOC_SNAP_CREATE_S,&a);
+    if(r==0)rep("ALLOW","CRITICAL snapshot-created");else vcls(r,"BTRFS_IOC_SNAP_CREATE");
+    close(s);close(d);
+  }else if(!strcmp(op,"ioctlscan")&&argc==3){ /* enumerate security-relevant ioctl routes on one fd;
+      kernel has no ioctl-enumeration API: ENOTTY probing IS the heuristic.
+      REACHABLE=succeeded DENIED=EPERM/EACCES NOTTY=not-a-route ERR=other */
+    const char*p=argv[2];
+    int f=open(p,O_RDWR); if(f<0) f=open(p,O_RDONLY);
+    if(f<0){printf("SKIP open errno=%d %s\n",errno,strerror(errno));return 0;}
+    int zero=0; char buf[128]={0};
+#ifdef TUNSETIFF
+    struct ifreq ifr; memset(&ifr,0,sizeof ifr); strcpy(ifr.ifr_name,"ls%d"); ifr.ifr_flags=IFF_TUN|IFF_NO_PI;
+#endif
+#ifdef DM_VERSION
+    struct dm_ioctl dmi; memset(&dmi,0,sizeof dmi); dmi.version[0]=4;dmi.version[1]=0;dmi.version[2]=0; dmi.data_size=sizeof dmi;
+#endif
+#ifdef FBIOGET_VSCREENINFO
+    struct fb_var_screeninfo fbv; memset(&fbv,0,sizeof fbv);
+#endif
+#ifdef SG_IO
+    struct sg_io_hdr sgi; unsigned char cdb[6]={0x12,0,0,0,36,0},sense[32]={0},dio[96]={0}; /* INQUIRY: read-only */
+    memset(&sgi,0,sizeof sgi); sgi.interface_id='S'; sgi.dxfer_direction=SG_DXFER_FROM_DEV;
+    sgi.cmd_len=6; sgi.cmdp=cdb; sgi.dxferp=dio; sgi.dxfer_len=96; sgi.sbp=sense; sgi.mx_sb_len=sizeof sense; sgi.timeout=5000;
+#endif
+    struct { const char*n; unsigned long r; void*a; } T[]={
+      {"FS_IOC_GETFLAGS",FS_IOC_GETFLAGS,&zero},
+      {"FS_IOC_SETFLAGS_CLEAR",FS_IOC_SETFLAGS,&zero},
+      {"FS_IOC_FSGETXATTR",FS_IOC_FSGETXATTR,&zero},
+      {"FIBMAP",FIBMAP,&zero},
+#ifdef TIOCSTI
+      {"TIOCSTI",TIOCSTI,buf},          /* one '\n' into own input queue */
+      {"TIOCCONS_OFF",TIOCCONS,&zero},
+      {"TIOCGWINSZ",TIOCGWINSZ,buf},
+#endif
+#ifdef LOOP_CTL_GET_FREE
+      {"LOOP_CTL_GET_FREE",LOOP_CTL_GET_FREE,NULL},
+#endif
+#ifdef DM_VERSION
+      {"DM_VERSION",DM_VERSION,&dmi},
+      {"DM_LIST_DEVICES",DM_LIST_DEVICES,&dmi},
+#endif
+#ifdef KVM_GET_API_VERSION
+      {"KVM_GET_API_VERSION",KVM_GET_API_VERSION,NULL},
+#endif
+#ifdef TUNSETIFF
+      {"TUNSETIFF",TUNSETIFF,&ifr},
+#endif
+#ifdef EVIOCGNAME
+      {"EVIOCGNAME",EVIOCGNAME(sizeof buf-1),buf},
+#endif
+#ifdef FBIOGET_VSCREENINFO
+      {"FBIOGET_VSCREENINFO",FBIOGET_VSCREENINFO,&fbv},
+#endif
+#ifdef SG_IO
+      {"SG_IO_INQUIRY",SG_IO,&sgi},
+#endif
+    };
+    for(unsigned i=0;i<sizeof T/sizeof T[0];i++){
+      errno=0; long r=ioctl(f,T[i].r,T[i].a);
+      if(r>=0)printf("REACHABLE %s\n",T[i].n);
+      else{int e=errno;
+        if(e==ENOTTY)printf("NOTTY %s\n",T[i].n);
+        else if(e==EPERM||e==EACCES)printf("DENIED %s errno=%d %s\n",T[i].n,e,strerror(e));
+        else printf("ERR %s errno=%d %s\n",T[i].n,e,strerror(e));}
+    }
+    close(f);
   }else if(!strcmp(op,"ptrace-sibling")){ /* attach to a same-uid NON-child process */
     int pfd[2];if(pipe(pfd)){rep("INCONCLUSIVE","pipe-fail");return 0;}
     pid_t mid=fork();
@@ -461,13 +599,11 @@ check in-symlink      allow ln -sf /etc/hostname "$SAN/lnk"
 check in-exec-home    info sh -c 'cp /bin/true "$1/true" && "$1/true" && echo EXEC-OK' sh "$SAN"
 check out-hardlink    deny ln /etc/hostname "$SAN/hl"             # cross-boundary link
 check out-rename      deny mv "$SAN/f" "$OUT/f"
-if have btrfs; then
-  check in-btrfs-subvol allow btrfs subvolume create "$SAN/subvol"
-  check out-btrfs-subvol deny btrfs subvolume create "$OUT/subvol"   # the known CVE class
-  check out-btrfs-snap  deny btrfs subvolume snapshot "$SAN" "$OUT/snap"
-else
-  rec in-btrfs-subvol info skip "no btrfs tool"; rec out-btrfs-subvol info skip "no btrfs tool"; rec out-btrfs-snap info skip "no btrfs tool"
-fi
+# btrfs subvolume/snapshot via RAW ioctl — the mkdir-hook-bypass class needs no
+# userspace tool; ENOTTY on non-btrfs = honest inconclusive
+hcheck in-btrfs-subvol  allow subvol "$SAN"
+hcheck out-btrfs-subvol deny subvol "$OUT"                        # target out-of-policy: open or ioctl must deny
+hcheck out-btrfs-snap   deny snap "$SAN" "$OUT"
 
 # ===================== 3. IOCTL-DRIVEN BYPASS CLASS ===================
 sec "3. ioctl-driven operations (hook-coverage gaps)"
@@ -481,17 +617,45 @@ if have chattr; then
     chattr -i "$SCRATCH/f" 2>/dev/null
   else rec in-chattr-immutable info deny "FS_IOC_SETFLAGS refused"; fi
 else rec in-chattr-immutable info skip "no chattr"; fi
-if [ "${LANDSCAN_SWAP:-0}" = 1 ] && have mkswap && have swapon; then
+if [ "$SAFE" = 0 ] && have mkswap && have swapon; then
   dd if=/dev/zero of="$SCRATCH/swap" bs=1M count=8 status=none
   mkswap "$SCRATCH/swap" >/dev/null 2>&1
   check out-swapon deny swapon "$SCRATCH/swap"   # CAP_SYS_ADMIN probe — HOST-GLOBAL if allowed
   swapoff "$SCRATCH/swap" 2>/dev/null
   rm -f "$SCRATCH/swap"
-else rec out-swapon info skip "gated(off) — LANDSCAN_SWAP=1 to enable"; fi
+else rec out-swapon info skip "gated(off — --safe)"; fi
 hcheck helper-mknod-open   deny mknodopen "$SAN/dev-null-clone"  # mknod then READ it
 hcheck helper-open-byhandle deny byhandle "$SAN/f"                # CAP_DAC_READ_SEARCH probe
 hcheck helper-loopctl      info loopctl                              # loop-device reachability
 hcheck helper-tiocsti      deny tiocsti                              # keystroke-injection ioctl
+
+# ===================== 3b. IOCTL ROUTE ENUMERATION ====================
+# No kernel API enumerates an fd's accepted ioctls — ENOTTY probing IS the
+# heuristic. Table-driven scan of security-relevant families per fd type;
+# every request becomes its own baseline entry so route additions are visible
+# as NEW lines in --check diffs.
+sec "3b. ioctl route enumeration (REACHABLE / DENIED / NOTTY per request)"
+if [ -x "$HELPER" ]; then
+  tl="$SCRATCH/targets"   # plain files, not process substitution: <(...) breaks where /dev/fd is absent
+  printf '%s\n' "$SAN/f" "$SAN" /dev/tty /dev/loop-control /dev/mapper/control /dev/kvm /dev/net/tun /dev/input/event0 /dev/fb0 /dev/sda /dev/nvme0n1 /dev/dri/card0 > "$tl"
+  while IFS= read -r tgt; do
+    [ -n "$tgt" ] || continue
+    short=${tgt//\//-}
+    [ $VERBOSE = 1 ] && echo "  \$ helper ioctlscan $tgt"
+    timeout 15 "$HELPER" ioctlscan "$tgt" > "$SCRATCH/scan.out" 2>&1
+    while read -r v req rest; do
+      case "$v" in
+        REACHABLE) rec "ioctl-$short-$req" info allow "$tgt $rest";;
+        DENIED)    rec "ioctl-$short-$req" info deny "$tgt $rest";;
+        NOTTY)     rec "ioctl-$short-$req" info notty "$tgt $rest";;
+        ERR)       rec "ioctl-$short-$req" info err "$tgt $rest";;
+        SKIP)      rec "ioctl-$short-$req" info skip "$tgt $rest";;
+      esac
+    done < "$SCRATCH/scan.out"
+  done < "$tl"
+else
+  rec ioctl-scan info skip "helper-unavailable(no cc)"
+fi
 
 # ===================== 4. MOUNT / NAMESPACE ===========================
 sec "4. Mount & namespace (expected deny)"
@@ -509,12 +673,12 @@ hcheck helper-setns-mnt deny setns /proc/1/ns/mnt
 sec "5. proc/sys & kernel interfaces (write-back = no host mutation)"
 kwriteback knob-core-pattern /proc/sys/kernel/core_pattern
 kwriteback knob-modprobe     /proc/sys/kernel/modprobe
-if [ "${LANDSCAN_SYSRQ:-0}" = 1 ]; then
+if [ "$SAFE" = 0 ]; then
   check knob-sysrq-h deny sh -c "echo h > /proc/sysrq-trigger"   # 'h'=help, harmless
 fi
-if [ "${LANDSCAN_TIME:-0}" = 1 ]; then
+if [ "$SAFE" = 0 ]; then
   hcheck knob-clock-settime deny clockset        # nudges clock µs forward, never back
-else rec knob-clock-settime info skip "gated(off) — LANDSCAN_TIME=1 to enable"; fi
+else rec knob-clock-settime info skip "gated(off — --safe)"; fi
 check read-kcore      deny sh -c "head -c1 /proc/kcore"
 check read-kallsyms   info head -c1 /proc/kallsyms
 check read-init-env   deny sh -c 'f=/proc/1/environ; if [ -r "$f" ]; then printf "readable %s bytes sha256:%s\n" "$(wc -c <"$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-16)"; else cat "$f"; fi'  # verdict only: NEVER copy env content into telemetry
@@ -567,7 +731,7 @@ done
 for f in /sys/fs/cgroup/pids/pids.max; do   # cgroup v1
   [ -r "$f" ] && printf '  cgroup %-16s %s\n' "pids/pids.max" "$(head -c 80 "$f" | tr '\n' ' ')"
 done
-hcheck rsrc-memhog     deny memhog "${LANDSCAN_MEMHOG_MB:-6144}"
+hcheck rsrc-memhog     deny memhog "${LANDSCAN_MEMHOG_MB:-$(mem_target_mb)}"
 PIDS_MAX=${LANDSCAN_PIDS_PROBE:-}
 if [ -z "$PIDS_MAX" ]; then
   PIDS_MAX=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || cat /sys/fs/cgroup/pids/pids.max 2>/dev/null || echo 600)
@@ -586,7 +750,7 @@ done
 sleep 1
 rec rsrc-pids-ceiling info allow "forked $n before stall (assumed ceiling=$PIDS_MAX) — compare vs config pids=512"
 jobs -p | xargs -r kill 2>/dev/null; wait 2>/dev/null
-FILL_MB=${LANDSCAN_FILL_MB:-2048}
+FILL_MB=${LANDSCAN_FILL_MB:-$(fill_target_mb)}
 if have dd; then
   out=$(timeout 60 dd if=/dev/zero of="$SCRATCH/fill" bs=1M count="$FILL_MB" 2>&1 | tail -1)
   rec rsrc-disk-fill info allow "$out (expect EDQUOT/ENOSPC if quota exists)"; rm -f "$SCRATCH/fill"
@@ -626,10 +790,8 @@ if [ -n "$BASELINE" ]; then
   for n in "${ORDER[@]}"; do printf '%s\t%s\t%s\n' "$n" "${GOT[$n]}" "${DETAIL[$n]}" >> "$BASELINE"; done
   echo "baseline written: $BASELINE"
 fi
-if [ -n "$CHECK" ]; then
-  echo "--- diff vs baseline $CHECK ---"
-  declare -A OLD
-  while IFS=$'\t' read -r n g d; do [ -n "${n:-}" ] && OLD[$n]="$g"; done < "$CHECK"
+if [ ${#OLD[@]} -gt 0 ]; then
+  echo "--- diff vs $CHECK ---"
   for n in "${ORDER[@]}"; do
     o=${OLD[$n]:-}; g=${GOT[$n]}; w=${OVR[$n]:-${WANT[$n]}}
     [ -z "$o" ] && { echo "  NEW      $n ($g)"; continue; }
@@ -638,6 +800,15 @@ if [ -n "$CHECK" ]; then
     elif [ "$o" = "$w" ]; then echo "  REGRESSION $n: $o → $g"
     else echo "  CHANGED  $n: $o → $g"; fi
   done
+fi
+if [ "$ADOPT" = 1 ]; then
+  mkdir -p "$STATE"
+  : > "$STATE/expect.tsv"
+  for n in "${ORDER[@]}"; do
+    case "${WANT[$n]}" in info) continue;; esac
+    printf '%s\t%s\n' "$n" "${GOT[$n]}" >> "$STATE/expect.tsv"
+  done
+  echo "expect table adopted: $STATE/expect.tsv (future runs treat these verdicts as expected)"
 fi
 echo "SWEEP COMPLETE"
 exit $([ $UNEX -eq 0 ] && echo 0 || echo 1)

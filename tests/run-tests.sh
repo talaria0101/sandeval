@@ -33,7 +33,8 @@ bash "$SWEEP" >/dev/null 2>&1;                     [ $? -eq 2 ] && ok "no --repl
 bash "$SWEEP" --replica "$TD/a" "$TD/a/sub" >/dev/null 2>&1; [ $? -eq 2 ] && ok "OUT under IN -> 2" || bad "OUT under IN rc"
 bash "$SWEEP" --replica "$TD/never-created" "$TD/absent-out" >/dev/null 2>&1
 if [ $? -eq 2 ] && [ ! -e "$TD/never-created" ]; then ok "missing OUT -> 2, no IN side effect"; else bad "missing OUT handling"; fi
-bash "$SWEEP" --replica "$TD/out" >/dev/null 2>&1; [ $? -eq 2 ] && ok "missing positional -> 2" || bad "missing positional rc"
+bash "$SWEEP" --replica "$TD/out" "$TD/out2x" >/dev/null 2>&1; [ $? -eq 2 ] && ok "missing positional -> 2" || bad "missing positional rc"
+bash "$SWEEP" --replica a b c >/dev/null 2>&1; [ $? -eq 2 ] && ok "extra positional -> 2" || bad "extra positional rc"
 bash "$SWEEP" --replica --bogus x y >/dev/null 2>&1; [ $? -eq 2 ] && ok "unknown opt -> 2" || bad "unknown opt rc"
 bash "$SWEEP" --replica --check "$TD/nope.tsv" "$TD/in" "$TD/out" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "unreadable --check -> 2 (fail loud)" || bad "unreadable --check not fatal"
@@ -87,6 +88,20 @@ mkdir -p "$TD/in7"; printf 'SENTINEL_SECRET_VALUE_12345' > "$TD/out2/seedfile"
 "${GUARD_ENV[@]}" bash "$SWEEP" --replica --baseline "$TD/v7.tsv" "$TD/in7" "$TD/out2" >/dev/null 2>&1
 if grep -rq 'SENTINEL_SECRET_VALUE' "$TD/v7.tsv" "$TD"/run*.log 2>/dev/null; then bad "secret-shaped content leaked into telemetry"; else ok "no secret-shaped content in baseline/logs"; fi
 rm -f "$TD/out2/seedfile"
+echo "== 8. zero-flag auto mode: heuristics + auto-baseline + auto-diff + --adopt =="
+AW="$TD/autowd"; mkdir -p "$AW"
+G=(env LANDSCAN_MEMHOG_MB=16 LANDSCAN_FILL_MB=8 LANDSCAN_PIDS_PROBE=25)
+( cd "$AW" && "${G[@]}" bash "$SWEEP" --replica >auto1.log 2>&1; echo $? >rc1 )
+grep -q 'SWEEP COMPLETE' "$AW/auto1.log" && ok "auto run completes with no dirs/flags" || bad "auto run aborted"
+[ -f "$AW/.landscan-state/latest.tsv" ] && ok "auto baseline + state dir" || bad "no auto baseline"
+[ "$(cat "$AW/rc1")" -le 1 ] && ok "auto rc in {0,1}" || bad "auto rc=$(cat "$AW/rc1")"
+( cd "$AW" && "${G[@]}" bash "$SWEEP" --replica >auto2.log 2>&1 )
+[ "$(grep -c '  REGRESSION ' "$AW/auto2.log")" -eq 0 ] && ok "auto re-run: auto-diff, no false regressions" || bad "auto re-run regressions"
+( cd "$AW" && "${G[@]}" bash "$SWEEP" --replica --adopt >auto3.log 2>&1 )
+[ -f "$AW/.landscan-state/expect.tsv" ] && ok "--adopt wrote expect table" || bad "no expect table"
+( cd "$AW" && "${G[@]}" bash "$SWEEP" --replica >auto4.log 2>&1 )
+u1=$(grep -c '^\[!!\]' "$AW/auto1.log" || true); u4=$(grep -c '^\[!!\]' "$AW/auto4.log" || true)
+if [ "$u4" -lt "$u1" ] && [ "$u4" -le 2 ]; then ok "adoption cut unexpecteds ($u1 -> $u4)"; else bad "adoption ineffective ($u1 -> $u4)"; fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$FAIL TEST GROUP(S) FAILED"; exit 1; fi
