@@ -1,3 +1,6 @@
 .landscan-state/
 .landscan/
 .testrun.*
+__pycache__/
+*.pyc
+.sandeval-*/

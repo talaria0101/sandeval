@@ -1,0 +1,51 @@
+{
+  "version": "4.0.0",
+  "generated": "2026-09-14T12:00:00+00:00",
+  "context": {
+    "in_dir": "/workspace",
+    "out_dir": "/tmp",
+    "policy_file": "/state/policy.toml",
+    "seed": null,
+    "canary": null,
+    "safe": false,
+    "arm": false,
+    "host_files": ["/etc/resolv.conf", "/home/user/Local/bin/example"]
+  },
+  "summary": {"FAIL": 2, "PASS": 1, "SKIP": 1},
+  "results": [
+    {
+      "id": "V1",
+      "title": "inode metadata (chmod/utimes/setxattr) on out-of-policy host files",
+      "severity": "high",
+      "maps_to": "P3 / sweep §1",
+      "host_verify": "verify.sh (xattr user.sandeval.V1)",
+      "result": {
+        "status": "FAIL",
+        "evidence": "metadata writes accepted on out-of-policy files: /etc/resolv.conf:chmod+utimes+setxattr",
+        "detail": {"count": 1, "xattr": "user.sandeval.V1"}
+      }
+    },
+    {
+      "id": "V9",
+      "title": "seccomp denylist conformance (denied syscalls really are denied)",
+      "severity": "ship-blocker",
+      "maps_to": "P9 / sweep ks-*",
+      "host_verify": "",
+      "result": {
+        "status": "PASS",
+        "evidence": "all 31 denylisted syscalls returned EPERM/EACCES"
+      }
+    },
+    {
+      "id": "V12",
+      "title": "out-of-policy file read (direct / symlink / hardlink / proc fd)",
+      "severity": "ship-blocker",
+      "maps_to": "P2 / P14 / sweep out-symlink-read",
+      "host_verify": "verify.sh (seedfile)",
+      "result": {
+        "status": "SKIP",
+        "evidence": "no readable out-of-policy seed configured (--seed / $OUT/seedfile)"
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""sandeval CLI shim — keeps `bin/sandeval` importable from anywhere."""
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+sys.path.insert(0, os.path.join(_ROOT, "sandeval"))
+
+from runner import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

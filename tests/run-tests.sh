@@ -11,7 +11,7 @@
 # Usage: tests/run-tests.sh [path/to/landlock-surface-sweep.sh]
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SWEEP=${1:-$ROOT/landlock-surface-sweep.sh}
+SWEEP=${1:-$ROOT/sweep/landlock-surface-sweep.sh}
 FAIL=0
 ok(){ echo "  ok: $*"; }
 bad(){ echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
@@ -102,6 +102,14 @@ grep -q 'SWEEP COMPLETE' "$AW/auto1.log" && ok "auto run completes with no dirs/
 ( cd "$AW" && "${G[@]}" bash "$SWEEP" --replica >auto4.log 2>&1 )
 u1=$(grep -c '^\[!!\]' "$AW/auto1.log" || true); u4=$(grep -c '^\[!!\]' "$AW/auto4.log" || true)
 if [ "$u4" -lt "$u1" ] && [ "$u4" -le 2 ]; then ok "adoption cut unexpecteds ($u1 -> $u4)"; else bad "adoption ineffective ($u1 -> $u4)"; fi
+
+echo
+echo "== 9. sandeval vector harness self-tests =="
+if command -v python3 >/dev/null 2>&1; then
+  if python3 "$ROOT/tests/test_harness.py"; then ok "python harness tests"; else bad "python harness tests"; fi
+else
+  echo "  skip: python3 not installed"
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$FAIL TEST GROUP(S) FAILED"; exit 1; fi
