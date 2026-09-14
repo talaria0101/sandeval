@@ -1,0 +1,25 @@
+../sandeval/landlock-surface-sweep.sh: line 55: have: command not found
+
+=== 0. PREFLIGHT ===
+kernel: 6.18.39-gentoo-dist-bin   date: 2026-09-14T07:46:42Z
+  $ helper landlock-abi
+[ii] landlock-abi                   want=info  got=deny  ../sandeval/landlock-surface-sweep.sh: line 55: 25: command not found
+  $ mkdir -p /home/qaidvoid/.local/state/errand/b2ph5u84a7sv/home/sweep-run/in-policy/sanity
+[!!] sanity-in-mkdir                want=allow got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+  $ sh -c echo x > '/home/qaidvoid/.local/state/errand/b2ph5u84a7sv/home/sweep-run/in-policy/sanity/f'
+[!!] sanity-in-write                want=allow got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+  $ /bin/true
+[ii] sanity-execute-true            want=info  got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+
+=== 1. FS operations on OUT (expected deny) ===
+  $ mkdir -p /opt/d1
+[ok] out-mkdir                      want=deny  got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+  $ touch /opt/f1
+[ok] out-creat                      want=deny  got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+  $ sh -c echo x > '/opt/f1'
+[ok] out-write                      want=deny  got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+  $ sh -c echo x >> '/opt/f1'
+[ok] out-append                     want=deny  got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+  $ truncate -s 1 /opt/f1
+[ok] out-truncate                   want=deny  got=deny   ../sandeval/landlock-surface-sweep.sh: line 55: 15: command not found
+../sandeval/landlock-surface-sweep.sh: line 65: n: unbound variable

@@ -1,0 +1,81 @@
+landlock-abi	allow	ALLOW 
+sanity-in-mkdir	allow	 
+sanity-in-write	allow	 
+sanity-execute-true	allow	 
+out-mkdir	deny	 mkdir: cannot create directory ‘/opt/d1’: Permission denied
+out-creat	deny	 touch: cannot touch '/opt/f1': Permission denied
+out-write	deny	 sh: line 1: /opt/f1: Permission denied
+out-append	deny	 sh: line 1: /opt/f1: Permission denied
+out-truncate	deny	 truncate: cannot open '/opt/f1' for writing: Permission denied
+out-unlink	skip	seed /opt/seedfile operator-side to enable
+out-read-etc-passwd	deny	 cat: /etc/passwd: No such file or directory
+out-read-etc-hostname	deny	 cat: /etc/hostname: No such file or directory
+out-read-shadow	deny	 cat: /etc/shadow: No such file or directory
+out-read-ssh-hostkey	deny	 cat: /etc/ssh/ssh_host_ed25519_key: No such file or directory
+out-read-root-ssh	deny	 cat: /root/.ssh/id_rsa: No such file or directory
+in-mkfifo	allow	 
+in-symlink	allow	 
+in-exec-home	allow	 EXEC-OK
+out-symlink-read	skip	seed /opt/seedfile operator-side to enable
+out-hardlink	deny	 ln: failed to access '/etc/hostname': No such file or directory
+out-rename	deny	 mv: cannot create regular file '/opt/f': Permission denied
+in-btrfs-subvol	skip	no btrfs tool
+out-btrfs-subvol	skip	no btrfs tool
+out-btrfs-snap	skip	no btrfs tool
+out-reflink	deny	 cp: cannot create regular file '/opt/f': Permission denied
+in-chattr-immutable	deny	FS_IOC_SETFLAGS refused
+out-swapon	deny	 swapon: /home/qaidvoid/.local/state/errand/b2ph5u84a7sv/home/sweep-run/in-policy/sanity/sw
+helper-mknod-open	deny	DENY mknod errno=1
+helper-open-byhandle	deny	DENY n2h errno=20
+mnt-bind	deny	        dmesg(1) may have more information after failed mount system call.
+mnt-tmpfs	deny	        dmesg(1) may have more information after failed mount system call.
+mnt-proc	deny	        dmesg(1) may have more information after failed mount system call.
+ns-unshare-m	deny	 unshare: unshare failed: Operation not permitted
+ns-unshare-ur	deny	 unshare: unshare failed: Operation not permitted
+ns-unshare-net	deny	 unshare: unshare failed: Operation not permitted
+ns-chroot	deny	 chroot: failed to run command ‘/true’: No such file or directory
+helper-setns-mnt	deny	DENY errno=1 Operation not permitted
+knob-core-pattern	deny	write-back refused
+knob-modprobe	deny	write-back refused
+read-kcore	deny	 head: cannot open '/proc/kcore' for reading: Permission denied
+read-kallsyms	allow	 0
+read-init-env	allow	 BAILEY_SANDBOX=1BAILEY_SANDBOX_NET=host[REDACTED-init-env]
+read-init-cmdline	allow	 pi
+read-self-caps	allow	 CapAmb:	0000000000000000
+ks-bpf	deny	DENY errno=1 Operation not permitted
+ks-perf	deny	DENY errno=1 Operation not permitted
+ks-userfaultfd	deny	DENY errno=1 Operation not permitted
+ks-io_uring	allow	ALLOW io_uring_setup
+ks-keyring-add	deny	DENY errno=1 Operation not permitted
+ks-finit-module	deny	DENY errno=1 Operation not permitted
+ks-kexec	deny	DENY errno=1 Operation not permitted
+dev-kmsg-open	deny	DENY errno=2 No such file or directory
+dev-mem-open	deny	DENY errno=2 No such file or directory
+dev-console-open	deny	DENY errno=2 No such file or directory
+dev-ldpreload-open	deny	DENY errno=2 No such file or directory
+ipc-ptrace-child	deny	DENY errno=1
+ipc-ptrace-init	deny	DENY errno=1 Operation not permitted
+proc-kill0-init	allow	 
+proc-1-ns-open	allow	 
+net-abstract-bind	allow	ALLOW abstract-ns-bind
+priv-cap-bounding	allow	
+priv-sudo	deny	 sh: line 1: sudo: command not found
+priv-setuid-count	allow	45 setuid binaries visible
+rsrc-memhog	allow	ALLOW allocated-32MB-uncapped
+rsrc-pids-ceiling	allow	forked 600 before stall (pids.max=600) — compare vs config pids=512
+rsrc-disk-fill	allow	67108864 bytes (67 MB, 64 MiB) copied, 0.00726712 s, 9.2 GB/s (expect EDQUOT/ENOSPC if quota exists)
+net-tcp-80	allow	closed → canary.invalid:80
+net-tcp-443	allow	closed → canary.invalid:443
+net-tcp-8443	allow	closed → canary.invalid:8443
+net-tcp-22	allow	closed → canary.invalid:22
+net-tcp-9999	allow	closed → canary.invalid:9999
+net-doh	allow	400 DoH-over-443
+net-metadata	allow	000blocked cloud-metadata
+net-dns-udp	allow	resolving arbitrary-DNS
+net-local-2375	allow	closed localhost-daemon
+net-local-2376	allow	closed localhost-daemon
+net-local-8080	allow	closed localhost-daemon
+net-local-9090	allow	closed localhost-daemon
+net-rawsock	deny	DENY errno=1 Operation not permitted
+net-pktsock	deny	DENY errno=1 Operation not permitted
+net-netlink-route	allow	ALLOW route-table-dump(host-recon)
