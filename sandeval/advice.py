@@ -105,6 +105,22 @@ ADVICE = {
         "why": "Async I/O paths have historically lagged policy hooks, so an io_uring bypass would void the file policy while looking identical to openat.",
         "fix": "While it holds, re-test after every kernel upgrade. On FAIL: seccomp-deny io_uring_setup (425) and io_uring_enter (426), or set /proc/sys/kernel/io_uring_disabled=2 (kernel 6.6+).",
     },
+    "V25": {
+        "why": "The gap between what the Landlock kernel supports (net hooks, ioctl right) and what the policy uses is exactly where the policy is thinnest; this is the map an attacker draws first.",
+        "fix": "Measurement, not a break: on a kernel with ABI >= 4 add Landlock TCP bind/connect rules to the policy so network confinement stops depending on seccomp alone.",
+    },
+    "V26": {
+        "why": "openat2 is the newer VFS entry point; a filter or hook covering only openat leaves the replacement path wide open.",
+        "fix": "On FAIL: add openat2 (437) to the seccomp denylist, or rely on the LSM file-open hook (which covers both) after verifying with this vector.",
+    },
+    "V27": {
+        "why": "Raw, packet and netlink sockets have no port for a TCP allowlist to filter: raw ICMP is a ready exfil channel, AF_PACKET grants L2 sniffing, and a uevent-group bind is a live feed of host device events (spoofable with CAP_NET_ADMIN).",
+        "fix": "Drop CAP_NET_RAW and CAP_NET_ADMIN from the sandbox, and seccomp-deny socket() for AF_PACKET and AF_NETLINK plus SOCK_RAW; keep egress enforcement in netfilter for all protocols.",
+    },
+    "V28": {
+        "why": "SysV IPC has no namespace by default, so on a shared kernel the agent can attach same-uid (or, as root, any) host segments and read live process memory through an interface no path policy mediates.",
+        "fix": "Create the sandbox in a new IPC namespace (clone(CLONE_NEWIPC)/unshare -i) or seccomp-deny shmget/shmat; prefer POSIX shm under a policy-controlled directory.",
+    },
 }
 
 DEFAULT = {

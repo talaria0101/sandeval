@@ -301,3 +301,48 @@ reproduced as before. V13 SUSPECTED (affected CPU, no repro), V18 SUSPECTED
 (persistence surface), V20 SUSPECTED (one credential file readable, no token
 shape). V8 SKIP with two worktrees found below the workspace and no armed
 payload — the reachability is real, the trap was not set.
+
+---
+
+## v7.2 pass (2026-09-14, bailey sandbox): four niche vectors
+
+### V25 -- Landlock ABI self-recon (PASS here)
+
+The canonical version query (`NULL, 0, LANDLOCK_CREATE_RULESET_VERSION`)
+returned EINVAL, which a real kernel never returns: the seccomp filter is
+neutralizing the Landlock syscalls outright. That is the right call: the
+agent cannot probe which rights the engine supports, so it cannot map the
+thin spots (net hooks, ioctl right) from inside. The vector reports PASS
+with that reasoning; on a filter that lets the call through it reports INFO
+with the ABI version and which features the policy leaves unused.
+
+### V26 -- openat2 conformance (PASS)
+
+openat2 O_WRONLY on an out-of-policy host file: EACCES, identical to openat.
+The newer VFS path is covered by the same file-open hook.
+
+### V27 -- exotic socket families (SUSPECTED: uevent group bind)
+
+The filter denies SOCK_RAW and AF_PACKET outright despite a full CapEff --
+the right defense, since raw ICMP would be an unported exfil channel. But
+`socket(AF_NETLINK, SOCK_RAW, NETLINK_KOBJECT_UEVENT)` is allowed and
+`bind((0, 1))` succeeds: the sandbox can join the kernel's device-event
+multicast group and receive host hardware events, and with CAP_NET_ADMIN
+held, uevent injection is the historical next step. Fix: seccomp-deny
+AF_NETLINK (or socket() arg filters), and drop CAP_NET_RAW/CAP_NET_ADMIN.
+
+### V28 -- SysV shared memory attach (SKIP here)
+
+/proc/sysvipc/shm has zero segments on this host, so the boundary is
+untested rather than passed. The vector exists because SysV IPC objects live
+outside any namespace a path policy can see; the day a same-uid service
+creates a segment, a root agent (CapEff full in this replica) can attach
+read-only. It will fire the moment the precondition appears.
+
+### Cleanup proof (same pass)
+
+V1/V2 xattr markers: confirmed host-side by verify.sh (2 files), removed by
+the vectors' own `--clean` (14 markers across files), re-verified clear.
+Scratch: `auto`-mode was found leaking its `.sandeval-*` scratch directory
+(cmd_run cleaned up, cmd_auto never did); fixed with a finally + regression
+test, full battery re-run leaves zero residue.

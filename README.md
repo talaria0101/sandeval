@@ -102,7 +102,7 @@ against a previous report without leaving the run command.
 bin/sandeval              runner CLI (Python stdlib only)
 run.sh                    one-command unattended run (vectors + sweep + reports)
 sandeval/                 runner + core types
-vectors/                  v01..v24, auto-discovered
+vectors/                  v01..v28, auto-discovered
 tools/                    C helpers + git_p15_trap.sh
 sweep/                    landlock-surface-sweep.sh — syscall-surface conformance
 host-verify/verify.sh     host-side confirmation + cleanup
@@ -151,6 +151,10 @@ tests/                    test_harness.py + run-tests.sh
 | V22 | high | `chroot(2)` reachable / classic escape walk | P9 |
 | V23 | high | ptrace read/write of a stopped child's memory | P12, P9 |
 | V24 | high | `io_uring` openat bypasses the policy that binds `openat(2)` | P2 |
+| V25 | info | Landlock ABI self-recon (supported vs enforced features) | P9 |
+| V26 | medium | `openat2` honours the policy that binds `openat(2)` | P2 |
+| V27 | high | exotic socket families (raw/packet/netlink uevent) | P5, P6 |
+| V28 | high | SysV shared memory: read-only attach to host segments | P2, P12 |
 
 Any `FAIL` on V5, V8, V9, V12 or V13 is a ship-blocker. Current state against
 bailey/errand and remediation: `docs/findings.md`.
@@ -193,14 +197,14 @@ Drop a `vNN_name.py` into `vectors/`. The runner discovers `v*.py` and loads
 the module-level `VECTOR`:
 
 ```python
-"""V25 — one paragraph on the control and why it matters."""
+"""V29 — one paragraph on the control and why it matters."""
 try:
     from sandeval.base import Result, Status, Vector
 except ImportError:
     from base import Result, Status, Vector
 
 class MyVector(Vector):
-    id = "V25"
+    id = "V29"
     title = "short imperative title"
     severity = "high"          # ship-blocker | high | medium | low | info
     maps_to = "P7"
@@ -225,6 +229,42 @@ Rules that keep the battery honest:
   seccomp; pass deliberately-invalid arguments so an unfiltered syscall faults
   first (`tools/userns_clone.c`, `v09`).
 - **Mark host-global probes** `host_global = True` so `--safe` skips them.
+
+---
+
+## Proving the PoCs (and the cleanup)
+
+A FAIL is only real if the artifact is real. The short proof loop, with the
+expected outcome on this replica in brackets:
+
+```sh
+./bin/sandeval run --vector V1,V2,V21,V6,V22 --in . --out /opt
+getfattr -n user.sandeval.V2 --only-values /etc/resolv.conf | wc -c
+    # [65536: the payload really sits in a host inode]
+python3 -c "import json; d=json.load(open('sandeval-report.json')); \
+  print([s for r in d['results'] if r['id']=='V21' for s in r['result']['detail']['stolen']][:2])"
+    # [pid 1 fd 0/1 fstat lines: the stolen descriptors are real]
+host-verify/verify.sh
+    # [FOUND: the xattr markers, host-side]
+```
+
+Cleanup is the other half of the proof, and it is verified the same way:
+
+```sh
+./bin/sandeval run --clean --vector V1,V2 --in . --out /opt
+    # [removed N xattr marker(s)]
+host-verify/verify.sh --clean && host-verify/verify.sh
+    # [clear: no xattr markers, no proof files]
+ls -d .sandeval-* 2>/dev/null
+    # [nothing: scratch is removed on exit, even after auto]
+```
+
+Two honest limits: V5's write-open of the orchestrator's stdio is proven by
+the open succeeding, not by injecting bytes (that is what `--arm` is for, and
+you should only arm it against a throwaway orchestrator); and V22's escape
+walk is SUSPECTED by design because on a Landlock sandbox the walk crosses no
+forbidden path. Vectors that fork (V22, V23) kill and reap their children;
+V28 detaches from any segment it attached.
 
 ---
 

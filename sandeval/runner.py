@@ -635,22 +635,26 @@ def cmd_auto(args: argparse.Namespace) -> int:
     print(f"canary: {ctx.canary or '(none)'}")
     print(f"host files: {len(ctx.host_files)}")
     print(f"\nrunning {len(vectors)} vector(s)")
-    records = run_vectors(ctx, vectors)
-    summary = summarize(records)
-    sweep_summary = []
-    if not args.no_sweep:
-        print("\nrunning syscall-surface sweep ...")
-        sweep_rc, sweep_log, sweep_summary = run_sweep(ctx, args.safe)
-        print(f"sweep rc={sweep_rc} ({len(sweep_log.splitlines())} lines)")
-        if args.sweep_log:
-            with open(args.sweep_log, "w") as handle:
-                handle.write(sweep_log)
-    write_reports(records, ctx, args)
-    if args.report and sweep_summary:
-        with open(args.report, "a") as handle:
-            handle.write("\n## Sweep summary\n\n```\n" + "\n".join(sweep_summary) + "\n```\n")
-    if args.compare:
-        _compare_against(args.compare, {"results": records})
+    try:
+        records = run_vectors(ctx, vectors)
+        summary = summarize(records)
+        sweep_summary = []
+        if not args.no_sweep:
+            print("\nrunning syscall-surface sweep ...")
+            sweep_rc, sweep_log, sweep_summary = run_sweep(ctx, args.safe)
+            print(f"sweep rc={sweep_rc} ({len(sweep_log.splitlines())} lines)")
+            if args.sweep_log:
+                with open(args.sweep_log, "w") as handle:
+                    handle.write(sweep_log)
+        write_reports(records, ctx, args)
+        if args.report and sweep_summary:
+            with open(args.report, "a") as handle:
+                handle.write("\n## Sweep summary\n\n```\n" + "\n".join(sweep_summary) + "\n```\n")
+        if args.compare:
+            _compare_against(args.compare, {"results": records})
+    finally:
+        if not args.keep_scratch:
+            shutil.rmtree(ctx.scratch, ignore_errors=True)
     print("\nnext: run host-verify on the host, then `sandeval diff old.json new.json`")
     return _exit_code(summary, args)
 

@@ -15,7 +15,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(ROOT, "bin", "sandeval")
-EXPECTED_IDS = [f"V{n}" for n in range(1, 25)]
+EXPECTED_IDS = [f"V{n}" for n in range(1, 29)]
 SEVERITIES = {"ship-blocker", "high", "medium", "low", "info"}
 
 
@@ -255,6 +255,14 @@ class ReportActionTests(unittest.TestCase):
             for record in data["results"]:
                 self.assertIsInstance(record["duration_ms"], int)
                 self.assertIn("fix", record["remediation"])
+
+    def test_auto_removes_scratch(self):
+        """Regression: auto-mode used to leave .sandeval-* scratch dirs behind."""
+        with tempfile.TemporaryDirectory() as td:
+            out = run("auto", "--no-sweep", "--vector", "V8", "--in", td, "--out", td)
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            residue = [n for n in os.listdir(td) if n.startswith(".sandeval-")]
+            self.assertEqual(residue, [])
 
     def test_compare_reports_improvement(self):
         with tempfile.TemporaryDirectory() as td:

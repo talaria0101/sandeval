@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-__version__ = "7.1.0"
+__version__ = "7.2.0"
 
 
 class Status(str, Enum):
