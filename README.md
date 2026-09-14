@@ -63,6 +63,39 @@ leave their proof outside the sandbox.
 
 ---
 
+## Reading the report
+
+The markdown report is written to be worked, not archived. Its sections:
+
+- **Summary** — counts and the process exit code.
+- **Action required: FAIL** — one block per failure, ordered ship-blocker
+  first, each with the finding, why it matters, the concrete fix (syscall
+  numbers and mount/cgroup changes included), an exact reproduce command and
+  the host-side confirm step.
+- **Review: SUSPECTED** — the same block shape for findings the sandbox cannot
+  score alone.
+- **Passed / Skipped** — compact tables; skip reasons say which precondition
+  to supply (a seed, a worktree, a compiler).
+- **Vectors** — the full flat table, including timing per vector in the JSON.
+- **Next steps** — the exact commands for the fix-retest loop: confirm
+  host-side, re-run only the failures, diff future runs against this one.
+
+The practical loop after a first run:
+
+```sh
+./run.sh                                        # baseline report
+host-verify/verify.sh                           # score the claims host-side
+# ... apply fixes ...
+./bin/sandeval run --vector V5,V21 --compare sandeval-report.json
+                                                # did the fixes hold?
+./run.sh --fail-on SUSPECTED                    # strict mode for CI
+```
+
+`--compare` prints REGRESSION / IMPROVED / CHANGED / NEW / GONE movements
+against a previous report without leaving the run command.
+
+---
+
 ## Layout
 
 ```

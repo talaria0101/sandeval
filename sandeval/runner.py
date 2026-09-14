@@ -15,9 +15,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, Iterable, List, Optional
+import time
+from typing import Dict, Iterable, List, Optional, Tuple
 
 try:
+    from . import advice
     from .base import (
         Context,
         Result,
@@ -28,6 +30,7 @@ try:
         errno_name,
     )
 except ImportError:  # invoked as a plain script
+    import advice  # type: ignore
     from base import (  # type: ignore
         Context,
         Result,
@@ -257,6 +260,7 @@ def build_context(args: argparse.Namespace) -> Context:
         workspace=workspace,
         state_dir=state_dir,
         policy_file=policy_file,
+        started=time.monotonic(),
         log_fn=(lambda m: print("    " + m)) if args.verbose else (lambda _m: None),
     )
     ctx.host_files = discover_host_files(args.host_file or [], ctx)
@@ -299,9 +303,11 @@ def run_vectors(ctx: Context, vectors: List[Vector], cleanup: bool = False) -> L
     records: List[dict] = []
     for vector in vectors:
         print(f"[{vector.id:>3}] {vector.title} ...", flush=True)
+        duration_ms = 0
         if ctx.safe and _host_global(vector):
             result = Result(Status.SKIP, "host-global probe; re-run without --safe")
         else:
+            started = time.monotonic()
             try:
                 if cleanup:
                     if hasattr(vector, "cleanup"):
@@ -312,13 +318,16 @@ def run_vectors(ctx: Context, vectors: List[Vector], cleanup: bool = False) -> L
                     result = vector.check(ctx)
             except Exception as exc:  # noqa: BLE001 - never let a vector abort the suite
                 result = Result(Status.SKIP, f"vector raised {type(exc).__name__}: {exc}")
+            duration_ms = int((time.monotonic() - started) * 1000)
         record = {
             "id": vector.id,
             "title": vector.title,
             "severity": vector.severity,
             "maps_to": vector.maps_to,
             "host_verify": vector.host_verify,
+            "duration_ms": duration_ms,
             "result": result.to_dict(),
+            "remediation": advice.for_id(vector.id),
         }
         records.append(record)
         icon = {"PASS": "ok", "FAIL": "!!", "SUSPECTED": "??", "SKIP": "--", "INFO": "ii"}[
@@ -340,12 +349,22 @@ def summarize(records: List[dict]) -> Dict[str, int]:
     return counts
 
 
+def _clean_evidence(text: str, limit: int = 260) -> str:
+    """One-line, pipe/tab-safe evidence, bounded for report readability."""
+    text = (text or "").replace("|", "\\|").replace("\t", " ").replace("\n", " ")
+    if len(text) > limit + 40:
+        return text[:limit] + f" ... [+{len(text) - limit} chars, full text in the JSON report]"
+    return text
+
+
 def render_markdown(records: List[dict], ctx: Context, summary: Dict[str, int]) -> str:
+    runtime = time.monotonic() - ctx.started if ctx.started else 0.0
     lines = [
         "# sandeval report",
         "",
         f"- generated: {_dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds')}",
         f"- harness: sandeval {__version__}",
+        f"- runtime: {runtime:.1f}s",
         f"- in-policy dir: `{ctx.in_dir}`",
         f"- out-of-policy dir: `{ctx.out_dir}`",
         f"- policy: `{ctx.policy_file or 'not found'}`",
@@ -360,20 +379,81 @@ def render_markdown(records: List[dict], ctx: Context, summary: Dict[str, int]) 
     for status in ("FAIL", "SUSPECTED", "PASS", "SKIP", "INFO"):
         if status in summary:
             lines.append(f"| {status} | {summary[status]} |")
+    exit_note = (
+        "exit 1 (findings present)" if summary.get("FAIL") else "exit 0 (nothing failed)"
+    )
+    lines += ["", f"Process exit code: **{exit_note}**."]
+
+    def finding_block(rec: dict) -> List[str]:
+        result = rec["result"]
+        fix = advice.for_id(rec["id"])
+        block = [
+            f"#### {rec['id']} {rec['title']} ({rec['severity']})",
+            "",
+            f"- **finding:** {_clean_evidence(result.get('evidence'))}",
+        ]
+        if fix["why"]:
+            block.append(f"- **why it matters:** {fix['why']}")
+        if fix["fix"]:
+            block.append(f"- **fix:** {fix['fix']}")
+        block.append(
+            f"- **reproduce:** `./bin/sandeval run --vector {rec['id']} --in {ctx.in_dir} --out {ctx.out_dir}`"
+        )
+        block.append("- **confirm host-side:** `host-verify/verify.sh` (then `--clean` to remove markers)")
+        block.append("")
+        return block
+
+    failed = [r for r in records if r["result"]["status"] == "FAIL"]
+    suspected = [r for r in records if r["result"]["status"] == "SUSPECTED"]
+    passed = [r for r in records if r["result"]["status"] in ("PASS", "INFO")]
+    skipped = [r for r in records if r["result"]["status"] == "SKIP"]
+
+    if failed:
+        lines += ["## Action required: FAIL", ""]
+        for rec in sorted(failed, key=lambda r: (SEVERITY_ORDER.get(r["severity"], 99), r["id"])):
+            lines += finding_block(rec)
+    if suspected:
+        lines += ["## Review: SUSPECTED", ""]
+        for rec in sorted(suspected, key=lambda r: (SEVERITY_ORDER.get(r["severity"], 99), r["id"])):
+            lines += finding_block(rec)
+
+    lines += ["## Passed", "", "| id | severity | ms | title |", "|---|---|---|---|"]
+    for rec in sorted(passed, key=lambda r: (SEVERITY_ORDER.get(r["severity"], 99), r["id"])):
+        lines.append(
+            f"| {rec['id']} | {rec['severity']} | {rec.get('duration_ms', 0)} | {rec['title']} |"
+        )
+    if skipped:
+        lines += ["", "## Skipped (a precondition is missing, never counted as a pass)", "", "| id | title | reason |", "|---|---|---|"]
+        for rec in skipped:
+            lines.append(
+                f"| {rec['id']} | {rec['title']} | {_clean_evidence(rec['result']['evidence'], 120)} |"
+            )
+
     lines += ["", "## Vectors", "", "| id | severity | status | maps to | finding |", "|---|---|---|---|---|"]
     for rec in records:
         result = rec["result"]
-        finding = (result.get("evidence") or "").replace("|", "\\|").replace("\n", " ")
         lines.append(
             f"| {rec['id']} | {rec['severity']} | {result['status']} | "
-            f"{rec['maps_to']} | {finding} |"
+            f"{rec['maps_to']} | {_clean_evidence(result.get('evidence'))} |"
         )
-    failed = [r for r in records if r["result"]["status"] == "FAIL"]
+
     if failed:
-        lines += ["", "## Host-side verification required", ""]
-        for rec in failed:
-            hv = rec.get("host_verify") or "host-verify/verify.sh"
-            lines.append(f"- **{rec['id']}** — {rec['title']}: `{hv}`")
+        lines += ["", "## Next steps", ""]
+        lines.append("1. Confirm the effects host-side (the sandbox cannot score itself): `host-verify/verify.sh`")
+        ids = ",".join(r["id"] for r in failed)
+        lines.append(f"2. Re-run just the failures after each fix: `./bin/sandeval run --vector {ids} --in {ctx.in_dir} --out {ctx.out_dir}`")
+        lines.append(f"3. When the failures are fixed, make CI strict: `--fail-on SUSPECTED`, and diff future runs against this report: `./bin/sandeval diff <this.json> <new.json>`")
+
+    lines += [
+        "",
+        "## Host-side verification required",
+        "",
+    ]
+    for rec in failed:
+        hv = rec.get("host_verify") or "host-verify/verify.sh"
+        lines.append(f"- **{rec['id']}** - {rec['title']}: `{hv}`")
+    if not failed:
+        lines.append("- nothing: no vector reported FAIL")
     lines.append("")
     return "\n".join(lines)
 
@@ -402,6 +482,7 @@ def write_reports(records: List[dict], ctx: Context, args: argparse.Namespace) -
             "safe": ctx.safe,
             "arm": ctx.arm,
             "host_files": ctx.host_files,
+            "runtime_s": round(time.monotonic() - ctx.started, 1) if ctx.started else 0.0,
         },
         "summary": summary,
         "results": records,
@@ -494,6 +575,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         records = run_vectors(ctx, vectors, cleanup=args.clean)
         write_reports(records, ctx, args)
+        if args.compare:
+            _compare_against(args.compare, {"results": records})
     finally:
         if not args.keep_scratch:
             shutil.rmtree(ctx.scratch, ignore_errors=True)
@@ -566,19 +649,30 @@ def cmd_auto(args: argparse.Namespace) -> int:
     if args.report and sweep_summary:
         with open(args.report, "a") as handle:
             handle.write("\n## Sweep summary\n\n```\n" + "\n".join(sweep_summary) + "\n```\n")
+    if args.compare:
+        _compare_against(args.compare, {"results": records})
     print("\nnext: run host-verify on the host, then `sandeval diff old.json new.json`")
     return _exit_code(summary, args)
 
 
-def cmd_diff(args: argparse.Namespace) -> int:
+def _compare_against(old_path: str, new_payload: dict) -> None:
+    """Print the regression diff of this run against a previous report."""
     try:
-        with open(args.old) as handle:
+        with open(old_path) as handle:
             old = json.load(handle)
-        with open(args.new) as handle:
-            new = json.load(handle)
     except (OSError, ValueError) as exc:
-        print(f"could not read reports: {exc}", file=sys.stderr)
-        return 2
+        print(f"warning: could not read --compare baseline {old_path}: {exc}", file=sys.stderr)
+        return
+    print(f"\ncomparison against {old_path}:")
+    diff_payloads(old, new_payload)
+
+
+def diff_payloads(old: dict, new: dict, json_path: Optional[str] = None,
+                  old_path: str = "", new_path: str = "") -> int:
+    """Print (and optionally write) the regression diff of two report payloads.
+
+    Returns the diff exit code: 1 when a REGRESSION was found, else 0.
+    """
     oldmap = {r["id"]: r["result"]["status"] for r in old.get("results", [])}
     newmap = {r["id"]: r["result"]["status"] for r in new.get("results", [])}
     order = list(newmap) + [i for i in oldmap if i not in newmap]
@@ -607,12 +701,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
             print(f"{vector_id:>4}  {before or '-':<11} {after or '-':<11} {verdict}")
             changes.append({"id": vector_id, "old": before, "new": after, "verdict": verdict})
     print(f"\n{regressions} regression(s), {movements} other movement(s)")
-    if getattr(args, "json", None):
-        with open(args.json, "w") as handle:
+    if json_path:
+        with open(json_path, "w") as handle:
             json.dump(
                 {
-                    "old": args.old,
-                    "new": args.new,
+                    "old": old_path,
+                    "new": new_path,
                     "regressions": regressions,
                     "movements": movements,
                     "changes": changes,
@@ -622,8 +716,21 @@ def cmd_diff(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
             handle.write("\n")
-        print(f"diff report: {args.json}")
+        print(f"diff report: {json_path}")
     return 1 if regressions else 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    try:
+        with open(args.old) as handle:
+            old = json.load(handle)
+        with open(args.new) as handle:
+            new = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"could not read reports: {exc}", file=sys.stderr)
+        return 2
+    rc = diff_payloads(old, new, getattr(args, "json", None), args.old, args.new)
+    return rc
 
 
 # --------------------------------------------------------------------------- #
@@ -646,6 +753,8 @@ def _add_probe_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--canary", help="HOST:PORT canary for egress vectors")
     p.add_argument("--fail-on", choices=("FAIL", "SUSPECTED"), default="FAIL",
                    help="exit 1 when any vector reaches this status or worse (default: FAIL)")
+    p.add_argument("--compare", metavar="OLD.json",
+                   help="after the run, diff it against a previous report and print movements")
     p.add_argument("--keep-scratch", action="store_true", help="do not remove the scratch dir")
 
 

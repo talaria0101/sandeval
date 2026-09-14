@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-__version__ = "7.0.0"
+__version__ = "7.1.0"
 
 
 class Status(str, Enum):
@@ -102,6 +102,7 @@ class Context:
     workspace: str = "/workspace"
     state_dir: str = "/state"
     policy_file: Optional[str] = None
+    started: float = 0.0
     log_fn: Callable[[str], None] = lambda _m: None
 
     # ---- helpers vectors share -------------------------------------------------

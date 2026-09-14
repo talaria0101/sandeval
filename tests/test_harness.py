@@ -198,6 +198,77 @@ class RunnerFeatureTests(unittest.TestCase):
                 self.assertIn(entry["severity"], SEVERITIES)
 
 
+class ReportActionTests(unittest.TestCase):
+    """The report must be actionable: ranked findings, why/fix, reproduce cmd."""
+
+    @staticmethod
+    def _rec(vid, status, severity="high", evidence="x"):
+        return {
+            "id": vid,
+            "title": f"title {vid}",
+            "severity": severity,
+            "maps_to": "P1",
+            "host_verify": "host-verify/verify.sh",
+            "duration_ms": 5,
+            "result": {"status": status, "evidence": evidence},
+            "remediation": {"why": "why text", "fix": "fix text"},
+        }
+
+    def _render(self, records):
+        sys.path.insert(0, os.path.join(ROOT, "sandeval"))
+        import runner  # noqa: E402
+        from base import Context  # noqa: E402
+
+        ctx = Context(in_dir="/in", out_dir="/out", scratch="/in/.s")
+        return runner.render_markdown(records, ctx, {"FAIL": 1, "PASS": 1})
+
+    def test_fail_gets_actionable_block(self):
+        md = self._render(
+            [self._rec("V1", "FAIL"), self._rec("V9", "PASS", severity="ship-blocker")]
+        )
+        self.assertIn("## Action required: FAIL", md)
+        self.assertIn("- **why it matters:**", md)
+        self.assertIn("- **fix:**", md)
+        self.assertIn("run --vector V1 --in /in --out /out", md)
+        self.assertIn("## Next steps", md)
+        self.assertIn("Process exit code: **exit 1", md)
+
+    def test_long_evidence_is_bounded(self):
+        md = self._render([self._rec("V2", "FAIL", evidence="p" * 800)])
+        self.assertIn("full text in the JSON report", md)
+
+    def test_advice_fallback_for_unknown_vector(self):
+        sys.path.insert(0, os.path.join(ROOT, "sandeval"))
+        import advice  # noqa: E402
+
+        self.assertTrue(advice.for_id("V999")["fix"])
+        self.assertIn("why", advice.for_id("V21"))
+
+    def test_records_carry_duration_and_remediation(self):
+        with tempfile.TemporaryDirectory() as td:
+            json_path = os.path.join(td, "r.json")
+            out = run("run", "--vector", "V8,V10", "--in", td, "--out", td, "--json", json_path)
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            with open(json_path) as handle:
+                data = json.load(handle)
+            self.assertGreater(data["context"]["runtime_s"], 0)
+            for record in data["results"]:
+                self.assertIsInstance(record["duration_ms"], int)
+                self.assertIn("fix", record["remediation"])
+
+    def test_compare_reports_improvement(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = os.path.join(td, "old.json")
+            with open(old, "w") as handle:
+                json.dump(
+                    {"results": [{"id": "V15", "result": {"status": "FAIL", "evidence": ""}}]},
+                    handle,
+                )
+            out = run("run", "--vector", "V15", "--in", td, "--out", td, "--compare", old)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertIn("IMPROVED", out.stdout)
+
+
 class SafeGateTests(unittest.TestCase):
     """--safe must SKIP host-global vectors (V8 arms a host-side trap)."""
 

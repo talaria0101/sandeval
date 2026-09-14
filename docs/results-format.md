@@ -42,13 +42,17 @@ sandbox versions.
   changes.
 - `generated` — RFC 3339 UTC.
 - `context` — what the run was pointed at. `safe`/`arm` record whether
-  host-global probes and injections were enabled.
+  host-global probes and injections were enabled; `runtime_s` is the wall
+  time of the run.
 - `summary` — counts by verdict.
 - `results[]` — one record per selected vector, in severity then id order.
   - `result.status` — `PASS`/`FAIL`/`SUSPECTED`/`SKIP`/`INFO`.
   - `result.evidence` — one human sentence. Key **names** only, never secret
     values.
   - `result.detail` — vector-specific structured data.
+  - `duration_ms` — how long the probe took; useful for spotting slow gates.
+  - `remediation` — `why` (impact) and `fix` (the concrete control to add) for
+    the finding, from the central advice table.
 
 ## Exit codes
 
@@ -65,7 +69,9 @@ sandbox versions.
 - `sandeval diff OLD NEW --json FILE` — `regressions`, `movements`, and a
   `changes[]` list of `{id, old, new, verdict}` with verdicts `REGRESSION` /
   `IMPROVED` / `CHANGED` / `NEW` / `GONE`. Only `REGRESSION` moves the exit
-  code (rc 1); `NEW` and `GONE` rows are reported, not scored.
+  code (rc 1); `NEW` and `GONE` rows are reported, not scored. `run` and
+  `auto` accept `--compare OLD.json` to print the same diff at the end of a
+  run (reporting only; the run's own exit code is unchanged).
 
 ## Versioning
 
