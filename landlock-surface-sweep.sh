@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# landlock-surface-sweep.sh — v2, exhaustive bailey/Landlock policy battery.
+# landlock-surface-sweep.sh — v3, exhaustive bailey/Landlock policy battery.
 #
 # PURPOSE
 #   Verify (not attack) sandbox enforcement. Every probe is a minimal, benign
@@ -9,11 +9,25 @@
 #
 # SAFETY
 #   * Refuses to run without --replica (guard against casual prod runs).
-#   * All scratch lives under the in-policy dir — never /tmp.
+#   * All scratch lives under the in-policy dir — never /tmp — in a fresh
+#     per-run ".landscan" subdir that is removed on exit (idempotent re-runs).
 #   * Kernel-knob probes write the CURRENT value back: proves writability
-#     without mutating host kernel state.
+#     without mutating host kernel state (full value, never truncated).
 #   * Network checks are informational by default (they measure channel
 #     openness, not enforcement). Encode site intent with --expect.
+#   * swapon / SysRq / clock_settime probes are opt-in env gates (they are
+#     host-global mutations if a sandbox allows them).
+#   * Run AS THE AGENT USER, never root — root makes many deny-checks
+#     meaningless (running as root is itself a finding).
+#
+# VERDICTS
+#   allow / deny / inconclusive (ENOENT, EOPNOTSUPP, EINVAL, exec-failure,
+#   timeout ... — anything that cannot be attributed to policy). Inconclusive
+#   NEVER counts as a pass: want=deny/allow vs inconclusive is flagged [??].
+#   Silence inconclusive-noise for paths your platform lacks via --expect.
+#   Egress TCP probes record open/closed as the verdict.
+#   DETAIL text is scrubbed: tabs/newlines flattened, secret-shaped
+#   "…TOKEN=…" values redacted (baselines are committed artifacts).
 #
 # USAGE
 #   landlock-surface-sweep.sh [opts] <in-policy-dir> <outside-policy-dir>
@@ -26,79 +40,114 @@
 #        LANDSCAN_FILL_MB=2048       disk-fill probe size
 #        LANDSCAN_MEMHOG_MB=6144     memory probe size (config says 4g)
 #        LANDSCAN_SYSRQ=1            opt-in: SysRq 'h' write probe (safe)
+#        LANDSCAN_SWAP=1             opt-in: swapon probe (host-global if allowed!)
+#        LANDSCAN_TIME=1             opt-in: clock_settime probe (nudges µs forward)
+#        LANDSCAN_PIDS_PROBE=N       force pids-probe ceiling (else cgroup/dflt 600)
 #
-# EXIT: 0 all as expected · 1 unexpected verdicts · 2 usage/setup error
+# EXIT: 0 all as expected · 1 unexpected/inconclusive verdicts · 2 usage/setup error
 
 set -u
+die(){ echo "ERROR: $*" >&2; exit 2; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+sec(){ echo; echo "=== $* ==="; }
+
 IN=""; OUT=""; BASELINE=""; CHECK=""; EXPECT=""; VERBOSE=0; REPLICA=0
-usage(){ grep -m1 -A100 '^# USAGE' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage(){ grep -m1 -A110 '^# USAGE' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 while [ $# -gt 0 ]; do case "$1" in
   --replica) REPLICA=1;; -v|--verbose) VERBOSE=1;;
-  --baseline) BASELINE="$2"; shift;; --check) CHECK="$2"; shift;;
-  --expect) EXPECT="$2"; shift;; -h|--help) usage;;
+  --baseline) [ $# -ge 2 ] || usage; BASELINE="$2"; shift;;
+  --check)    [ $# -ge 2 ] || usage; CHECK="$2"; shift;;
+  --expect)   [ $# -ge 2 ] || usage; EXPECT="$2"; shift;;
+  -h|--help) usage;;
   -*) echo "unknown opt $1" >&2; usage;;
-  *) if [ -z "$IN" ]; then IN="$1"; elif [ -z "$OUT" ]; then OUT="$1"; fi;;
+  *) if [ -z "$IN" ]; then IN="$1"; elif [ -z "$OUT" ]; then OUT="$1"; else die "unexpected argument: $1"; fi;;
 esac; shift; done
 [ "$REPLICA" = 1 ] || { echo "REFUSING: run only inside a disposable replica. Pass --replica to confirm." >&2; exit 2; }
 [ -n "$IN" ] && [ -n "$OUT" ] || usage
-case "$OUT" in "$IN"|"$IN"/*) echo "OUT must be outside the policy (not under IN)" >&2; exit 2;; esac
-mkdir -p "$IN" 2>/dev/null
-[ -d "$OUT" ] || { echo "outside-policy dir '$OUT' must already exist" >&2; exit 2; }
-if [ -n "$EXPECT" ] && [ -r "$EXPECT" ]; then
-  while read -r n w; do [ -n "${n:-}" ] && OVR[$n]="$w"; done < "$EXPECT"
-fi
+RIN=$(readlink -m "$IN" 2>/dev/null || echo "$IN")
+ROUT=$(readlink -m "$OUT" 2>/dev/null || echo "$OUT")
+case "$ROUT" in "$RIN"|"$RIN"/*) die "OUT must be outside the policy (not under IN)";; esac
+[ -d "$OUT" ] || die "outside-policy dir '$OUT' must already exist"
 
 declare -A WANT GOT DETAIL OVR=()
 ORDER=(); UNEX=0; UNEXLIST=""
-HELPER="$IN/.landscan-helper"
-PATH="$PATH:/sbin:/usr/sbin"                      # btrfs/mkswap/swapoff often live here
-have timeout || timeout(){ "$@"; }              # degrade gracefully w/o coreutils-timeout
+if [ -n "$EXPECT" ]; then
+  [ -r "$EXPECT" ] || die "--expect file '$EXPECT' not readable"
+  while read -r n w; do [ -n "${n:-}" ] && OVR[$n]="$w"; done < "$EXPECT"
+fi
+if [ -n "$CHECK" ]; then
+  [ -r "$CHECK" ] || die "--check baseline '$CHECK' not readable (typo? see --baseline to create one)"
+fi
+if [ -n "$BASELINE" ]; then
+  : > "$BASELINE" || die "--baseline '$BASELINE' not writable"
+fi
+# validation done — only now touch the filesystem
+mkdir -p "$IN" || die "cannot create in-policy dir '$IN'"
+[ -d "$IN" ] && [ -w "$IN" ] || die "in-policy dir '$IN' is not writable by $(id -u 2>/dev/null)"
+
+SCRATCH="$IN/.landscan"                          # fresh per run; removed by trap
+SAN="$SCRATCH/sanity"                            # creation-class probes live here (idempotent)
+HELPER="$SCRATCH/helper"
+PATH="$PATH:/sbin:/usr/sbin"                     # btrfs/mkswap/swapoff often live here
+have timeout || timeout(){ local t=$1; shift; "$@"; }   # degrade gracefully w/o coreutils-timeout
 OUT_WAS_MNT=0; mountpoint -q "$OUT" 2>/dev/null && OUT_WAS_MNT=1  # never unmount pre-existing mounts
 SEED="$OUT/seedfile"                             # operator-seeded out-of-policy file (see README)
 # REVIEW NOTE: run this script AS THE AGENT USER, never root — root makes every
 # deny-check meaningless (running as root is itself a finding; see README).
 
-sec(){ echo; echo "=== $* ==="; }
-have(){ command -v "$1" >/dev/null 2>&1; }
-
 line(){ # $1=name — classify using override if present
-  local n=$1 w=${OVR[$n]:-${WANT[$n]}} g=${GOT[$n]} s
+  local n=$1
+  local w=${OVR[$n]:-${WANT[$n]}} g=${GOT[$n]} s
   if [ "$w" = info ]; then s="[ii]"
   elif [ "$g" = "$w" ]; then s="[ok]"
   else s="[!!]"; UNEX=$((UNEX+1)); UNEXLIST="$UNEXLIST $n"; fi
-  printf '%s %-30s want=%-5s got=%-5s %s\n' "$s" "$n" "$w" "$g" "${DETAIL[$n]}"
+  printf '%s %-28s want=%-12s got=%-12s %s\n' "$s" "$n" "$w" "$g" "${DETAIL[$n]:-}"
 }
-rec(){ ORDER+=("$1"); WANT[$1]="$2"; GOT[$1]="$3"; DETAIL[$1]="${4:-}"; line "$1"; }
-
-check(){ # name want cmd...
+rec(){ # name want got detail — DETAIL flattened + secret-scrubbed (baselines get committed)
+  local n=$1
+  ORDER+=("$n"); WANT[$n]="$2"; GOT[$n]="$3"
+  DETAIL[$n]=$(printf '%s' "${4:-}" | tr '\t\n\r' '   ' \
+    | sed -E 's/([A-Za-z0-9_]*(token|secret|key|passwd|password|credential|auth)[A-Za-z0-9_]*=)[^ ]*/\1[REDACTED]/Ig')
+  line "$n"
+}
+check(){ # name want cmd... — verdict from rc + errno-shaped output sniffing
   local n=$1 want=$2; shift 2
   [ $VERBOSE = 1 ] && echo "  \$ $*"
-  local out rc; out=$(timeout 15 "$@" 2>&1); rc=$?
-  local got=deny d=""
-  [ $rc -eq 0 ] && got=allow
-  [ $rc -eq 124 ] && d="timeout"
-  [ $rc -eq 137 ] && d="killed(SIGKILL—cgroup?)"
-  d="$d $(printf '%s' "$out" | tail -n1 | head -c 90)"
+  local out rc got d
+  out=$(timeout 15 "$@" 2>&1); rc=$?
+  got=inconclusive; d=""
+  if [ $rc -eq 0 ]; then got=allow
+  elif [ $rc -eq 124 ] || [ $rc -eq 137 ]; then d="timeout-or-killed"
+  elif [ $rc -eq 126 ] || [ $rc -eq 127 ]; then d="exec-failure(cmd missing?)"
+  elif printf '%s' "$out" | grep -qiE 'permission denied|operation not permitted|not permitted|read-only file system'; then got=deny
+  elif printf '%s' "$out" | grep -qiE 'no such file or directory|invalid argument|operation not supported|not supported|function not implemented|file exists|is a directory|not a directory|invalid superblock|unknown filesystem|device or resource busy|resource temporarily unavailable|exec format error|no space left|disk quota exceeded'; then : # stays inconclusive
+  else got=deny; d="unattributed-rc$rc"           # failed with unrecognizable error: treat as deny
+  fi
+  local tailmsg; tailmsg="$(printf '%s' "$out" | tail -n1 | head -c 90)"
+  d="${d:+$d }$tailmsg"
   rec "$n" "$want" "$got" "$d"
 }
 hcheck(){ # name want helper-args... — verdict = first word of helper output
   local n=$1 want=$2; shift 2
   if [ ! -x "$HELPER" ]; then rec "$n" info skip "helper-unavailable(no cc)"; return; fi
   [ $VERBOSE = 1 ] && echo "  \$ helper $*"
-  local out got; out=$(timeout 25 "$HELPER" "$@" 2>&1)
+  local out got
+  out=$(timeout 25 "$HELPER" "$@" 2>&1)
   got=$(printf '%s' "$out" | awk '{print tolower($1);exit}')
-  case "$got" in allow|deny) ;; *) got=deny;; esac
-  rec "$n" "$want" "$got" "$(printf '%s' "$out" | head -c 100)"
+  case "$got" in allow|deny|inconclusive) ;; *) got=inconclusive; out="unparseable: $out";; esac
+  rec "$n" "$want" "$got" "$out"
 }
-kwriteback(){ # name path — write current value back; writability w/o mutation
+kwriteback(){ # name path — write FULL current value back; writability w/o mutation
   local n=$1 p=$2 cur
-  cur=$(cat "$p" 2>/dev/null | head -c 60)
-  if [ -z "$cur" ]; then rec "$n" deny skip "unreadable—cannot test"; return; fi
-  if printf '%s' "$cur" > "$p" 2>/dev/null; then rec "$n" deny allow "write-back-same-value"
+  cur=$(cat "$p" 2>/dev/null; printf x); cur=${cur%x}   # preserves trailing newline
+  if [ -z "$cur" ]; then rec "$n" deny inconclusive "unreadable-empty-cannot-test"; return; fi
+  if [ ${#cur} -gt 4096 ]; then rec "$n" deny inconclusive "value>${#cur}B-skipped"; return; fi
+  if printf '%s' "$cur" > "$p" 2>/dev/null; then rec "$n" deny allow "write-back-same-value(${#cur}B)"
   else rec "$n" deny deny "write-back refused"; fi
 }
 
 # ---------- embedded C helper: probes needing raw syscalls ----------
+mkdir -p "$SCRATCH" || echo "WARNING: cannot create scratch dir '$SCRATCH'" >&2
 if have cc || have gcc; then
   CC=$(have cc && echo cc || echo gcc)
   $CC -O1 -o "$HELPER" -x c - <<'CEOF' 2>/dev/null || echo "helper compile failed" >&2
@@ -111,6 +160,7 @@ if have cc || have gcc; then
 #include <fcntl.h>
 #include <signal.h>
 #include <sched.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/socket.h>
@@ -120,96 +170,231 @@ if have cc || have gcc; then
 #include <sys/ptrace.h>
 #include <sys/mman.h>
 #include <sys/uio.h>
+#include <sys/ioctl.h>
+#include <sys/prctl.h>
+#include <termios.h>
+#include <linux/loop.h>
+#if defined(__i386__)||defined(__x86_64__)
+#include <sys/io.h>
+#endif
 #include <netinet/in.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/if_ether.h>
 #include <arpa/inet.h>
+#ifndef FICLONE
+#define FICLONE _IOW(0x94, 9, int)
+#endif
 static void rep(const char*v,const char*d){printf("%s %s\n",v,d);}
+/* errno-aware classification: EPERM/EACCES = policy/cap deny; anything else
+ * (ENOENT, EINVAL, ENOSYS, EOPNOTSUPP, EFAULT, ...) = cannot attribute to
+ * policy — must never count as a deny "pass". */
+static void vcls(long r,const char*what){
+  if(r>=0){rep("ALLOW",what);return;}
+  int e=errno;
+  if(e==EPERM||e==EACCES)printf("DENY errno=%d %s (%s)\n",e,strerror(e),what);
+  else printf("INCONCLUSIVE errno=%d %s (%s)\n",e,strerror(e),what);
+}
 int main(int argc,char**argv){
-  if(argc<2){rep("DENY","usage");return 0;}
+  if(argc<2){rep("INCONCLUSIVE","usage");return 0;}
   const char*op=argv[1];
   if(!strcmp(op,"landlock-abi")){
 #ifdef SYS_landlock_create_ruleset
-    long r=syscall(SYS_landlock_create_ruleset,NULL,0,1);
-    if(r>=0)rep("ALLOW","");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    long r=syscall(SYS_landlock_create_ruleset,NULL,0,1); /* version query */
+    if(r>=0)printf("ALLOW abi-v%ld\n",r); else vcls(r,"create_ruleset(version)");
 #else
-    rep("DENY","landlock-syscall-undefined-in-headers");
+    rep("INCONCLUSIVE","landlock-syscall-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"llcompose")){ /* Landlock compose self-test: can a process stack its own ruleset? */
+#ifdef SYS_landlock_create_ruleset
+    struct { unsigned long long handled; } at = { (1ULL<<1)|(1ULL<<2) }; /* WRITE_FILE|READ_FILE */
+    long rd=syscall(SYS_landlock_create_ruleset,&at,sizeof at,0);
+    if(rd<0){vcls(rd,"create_ruleset");return 0;}
+#ifdef SYS_landlock_add_rule
+    struct { unsigned long long allowed; int parent_fd; } ab = { (1ULL<<1)|(1ULL<<2), 0 };
+    int pf=open("/",O_PATH|O_CLOEXEC);
+    if(pf<0){vcls(pf,"open-root");return 0;}
+    ab.parent_fd=pf;
+    if(syscall(SYS_landlock_add_rule,rd,1,&ab,0)){vcls(-1,"add_rule");close(pf);return 0;}
+    close(pf);
+#else
+    rep("INCONCLUSIVE","add_rule-undefined-in-headers");return 0;
+#endif
+    prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);
+    if(syscall(SYS_landlock_restrict_self,rd,0)){vcls(-1,"restrict_self");return 0;}
+    int f=open("/proc/self/status",O_RDONLY); if(f<0) f=open("/dev/null",O_RDONLY);
+    if(f>=0){rep("ALLOW","compose-ok(stacking-works)");close(f);}
+    else rep("DENY","compose-broken(own-allow-rule-denied)");
+#else
+    rep("INCONCLUSIVE","landlock-undefined-in-headers");
 #endif
   }else if(!strcmp(op,"uring")){
 #ifdef SYS_io_uring_setup
-    char p[120]={0};int fd=(int)syscall(SYS_io_uring_setup,8,p);
-    if(fd>=0){rep("ALLOW","io_uring_setup");close(fd);}else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    char p[120]={0};long fd=(long)syscall(SYS_io_uring_setup,8,p);
+    if(fd>=0){rep("ALLOW","io_uring_setup");close((int)fd);}else vcls(fd,"io_uring_setup");
 #else
-    rep("DENY","io_uring-syscall-undefined-in-headers");
+    rep("INCONCLUSIVE","io_uring-syscall-undefined-in-headers");
 #endif
   }else if(!strcmp(op,"byhandle")&&argc==3){
     struct{unsigned n;int t;unsigned char h[128];}fh;fh.n=128;int mnt;
-    int f=open(argv[2],O_RDONLY);if(f<0){printf("DENY open errno=%d\n",errno);return 0;}
-    if(syscall(SYS_name_to_handle_at,f,&fh,&mnt,0)){printf("DENY n2h errno=%d\n",errno);return 0;}
+    int f=open(argv[2],O_RDONLY);if(f<0){vcls(f,"open-src");return 0;}
+    if(syscall(SYS_name_to_handle_at,f,&fh,&mnt,0)){vcls(-1,"name_to_handle_at");close(f);return 0;}
     int m=open("/",O_PATH);long r=syscall(SYS_open_by_handle_at,m,&fh,O_RDONLY);
-    if(r>=0)rep("ALLOW","open_by_handle (CAP_DAC_READ_SEARCH?)");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(r>=0)rep("ALLOW","open_by_handle (CAP_DAC_READ_SEARCH?)");else vcls(r,"open_by_handle_at");
+    close(f);close(m);
   }else if(!strcmp(op,"rawsock")){
     int s=socket(AF_INET,SOCK_RAW|SOCK_CLOEXEC,IPPROTO_ICMP);
-    if(s>=0){rep("ALLOW","AF_INET RAW");close(s);}else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(s>=0){rep("ALLOW","AF_INET RAW");close(s);}else vcls(s,"socket(AF_INET,RAW)");
   }else if(!strcmp(op,"pktsock")){
     int s=socket(AF_PACKET,SOCK_RAW|SOCK_CLOEXEC,htons(ETH_P_ALL));
-    if(s>=0){rep("ALLOW","AF_PACKET");close(s);}else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(s>=0){rep("ALLOW","AF_PACKET");close(s);}else vcls(s,"socket(AF_PACKET,RAW)");
   }else if(!strcmp(op,"netlink")){
     int s=socket(AF_NETLINK,SOCK_RAW|SOCK_CLOEXEC,NETLINK_ROUTE);
     struct sockaddr_nl sa={0};sa.nl_family=AF_NETLINK;
-    if(s<0||bind(s,(void*)&sa,sizeof sa)){printf("DENY errno=%d\n",errno);return 0;}
+    if(s<0){vcls(s,"socket(netlink)");return 0;}
+    if(bind(s,(void*)&sa,sizeof sa)){vcls(-1,"bind(netlink)");return 0;}
     char b[256];struct nlmsghdr*h=(void*)b;struct rtgenmsg g={0};
     memset(b,0,sizeof b);h->nlmsg_len=NLMSG_LENGTH(sizeof g);h->nlmsg_type=RTM_GETROUTE;
     h->nlmsg_flags=NLM_F_REQUEST|NLM_F_DUMP;g.rtgen_family=AF_UNSPEC;
     memcpy(NLMSG_DATA(h),&g,sizeof g);
-    if(send(s,h,h->nlmsg_len,0)<0){printf("DENY send errno=%d\n",errno);return 0;}
+    if(send(s,h,h->nlmsg_len,0)<0){vcls(-1,"send(netlink)");return 0;}
     ssize_t n=recv(s,b,sizeof b,0);
-    if(n>0)rep("ALLOW","route-table-dump(host-recon)");else printf("DENY recv errno=%d\n",errno);
+    if(n>0)rep("ALLOW","route-table-dump(host-recon)");else vcls((long)n,"recv(netlink)");
   }else if(!strcmp(op,"abstract")&&argc==3){
     int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
     struct sockaddr_un a={0};a.sun_family=AF_UNIX;a.sun_path[0]=0;
     strncpy(a.sun_path+1,argv[2],90);
-    if(bind(s,(void*)&a,sizeof a)==0)rep("ALLOW","abstract-ns-bind");else printf("DENY errno=%d\n",errno);
+    if(bind(s,(void*)&a,sizeof a)==0)rep("ALLOW","abstract-ns-bind");else vcls(-1,"bind(abstract)");
   }else if(!strcmp(op,"setns")&&argc==3){
-    int f=open(argv[2],O_RDONLY);if(f<0){printf("DENY open errno=%d\n",errno);return 0;}
-    if(syscall(SYS_setns,f,0)==0)rep("ALLOW","setns(CRITICAL)");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    int f=open(argv[2],O_RDONLY);if(f<0){vcls(f,"open-ns");return 0;}
+    if(syscall(SYS_setns,f,0)==0)rep("ALLOW","setns(CRITICAL)");else vcls(-1,"setns");
+    close(f);
   }else if(!strcmp(op,"uffd")){
+#ifdef SYS_userfaultfd
     long r=syscall(SYS_userfaultfd,O_CLOEXEC|O_NONBLOCK);
-    if(r>=0)rep("ALLOW","userfaultfd");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(r>=0)rep("ALLOW","userfaultfd");else vcls(r,"userfaultfd");
+#else
+    rep("INCONCLUSIVE","userfaultfd-undefined-in-headers");
+#endif
   }else if(!strcmp(op,"perf")){
-    char a[96]={0};*(unsigned*)(a+4)=96;
+    char a[96]={0};*(unsigned*)(a+4)=96; /* attr.size; type=0 cycles */
     long r=syscall(SYS_perf_event_open,a,0,-1,-1,0);
-    if(r>=0)rep("ALLOW","perf_event");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(r>=0)rep("ALLOW","perf_event");else vcls(r,"perf_event_open");
   }else if(!strcmp(op,"bpf")){
-    char at[128]={0};*(unsigned*)(at+0)=1;*(unsigned*)(at+4)=4;*(unsigned*)(at+8)=4;*(unsigned*)(at+12)=1;
-    long r=syscall(SYS_bpf,0,at,sizeof at); /* BPF_MAP_CREATE */
-    if(r>=0)rep("ALLOW","bpf-map");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    struct { unsigned map_type,key_size,value_size,max_entries; } m = {1,4,4,1}; /* HASH 4/4 x1 */
+    long r=syscall(SYS_bpf,0,&m,sizeof m); /* BPF_MAP_CREATE */
+    if(r>=0){rep("ALLOW","bpf-map-create");close((int)r);}else vcls(r,"bpf(BPF_MAP_CREATE)");
   }else if(!strcmp(op,"keyring")){
-    long r=syscall(SYS_add_key,"user","landscan","v",1,-3); /* PROC_KEYRING */
-    if(r>=0)rep("ALLOW","add_key");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    long r=syscall(SYS_add_key,"user","landscan","v",1,-3); /* thread keyring */
+    if(r>=0)rep("ALLOW","add_key");else vcls(r,"add_key");
   }else if(!strcmp(op,"finitmod")){
+#ifdef SYS_finit_module
     int f=open("/dev/null",O_RDONLY);
+    if(f<0){vcls(f,"open-/dev/null");return 0;}
     long r=syscall(SYS_finit_module,f,"",0);
-    if(r==0)rep("ALLOW","CRITICAL-module-load");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(r==0)rep("ALLOW","CRITICAL-module-load");else vcls(r,"finit_module"); /* EPERM=blocked, EINVAL=reachable */
+    close(f);
+#else
+    rep("INCONCLUSIVE","finit_module-undefined-in-headers");
+#endif
   }else if(!strcmp(op,"kexec")){
     long r=syscall(SYS_kexec_load,0,0,NULL,0);
-    if(r==0)rep("ALLOW","CRITICAL-kexec");else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(r==0)rep("ALLOW","CRITICAL-kexec");else vcls(r,"kexec_load"); /* EPERM=blocked, EINVAL=reachable */
   }else if(!strcmp(op,"openw")&&argc==3){
     int f=open(argv[2],O_RDWR|O_CLOEXEC);
-    if(f>=0){rep("ALLOW","open-rw");close(f);}else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(f>=0){rep("ALLOW","open-rw");close(f);}else vcls(f,argv[2]); /* ENOENT -> INCONCLUSIVE */
   }else if(!strcmp(op,"mknodopen")&&argc==3){
-    if(mknod(argv[2],S_IFCHR|0600,makedev(1,3))){printf("DENY mknod errno=%d\n",errno);return 0;}
+    if(mknod(argv[2],S_IFCHR|0600,makedev(1,3))){
+      if(errno==EEXIST)unlink(argv[2]); /* idempotency */
+      vcls(-1,"mknod");return 0;}
     int f=open(argv[2],O_RDONLY);
-    if(f<0){printf("DENY open-after-mknod errno=%d (device-cgroup?)\n",errno);return 0;}
+    if(f<0){vcls(f,"open-after-mknod(device-cgroup?)");unlink(argv[2]);return 0;}
     char c;read(f,&c,1);rep("ALLOW","CRITICAL /dev/null-equivalent readable");close(f);
+    unlink(argv[2]);
+  }else if(!strcmp(op,"chroot")&&argc==3){ /* chroot(2) itself is the signal; no exec needed */
+    if(chroot(argv[2])==0)rep("ALLOW","CRITICAL chroot(2) permitted");else vcls(-1,"chroot");
+  }else if(!strcmp(op,"tiocsti")){ /* keystroke-injection ioctl on own tty */
+    int f=open("/dev/tty",O_RDWR);
+    if(f<0){vcls(f,"open-/dev/tty");return 0;}
+    char c='\n';
+    if(ioctl(f,TIOCSTI,&c)==0)rep("ALLOW","TIOCSTI-inject");else vcls(-1,"TIOCSTI");
+    close(f);
+  }else if(!strcmp(op,"ficlone")&&argc==4){ /* reflink across the policy boundary */
+    int s=open(argv[2],O_RDONLY);if(s<0){vcls(s,"open-src");return 0;}
+    int d=open(argv[3],O_WRONLY|O_CREAT|O_TRUNC,0600);
+    if(d<0){vcls(d,"open-dst");close(s);return 0;}
+    long r=ioctl(d,FICLONE,s);
+    if(r==0)rep("ALLOW","CRITICAL reflink-cross-boundary");else vcls(r,"FICLONE");
+    close(s);close(d);unlink(argv[3]);
+  }else if(!strcmp(op,"loopctl")){
+    int f=open("/dev/loop-control",O_RDONLY);
+    if(f<0){vcls(f,"open-loop-control");return 0;}
+    long r=ioctl(f,LOOP_CTL_GET_FREE,0);
+    if(r>=0)printf("ALLOW loop%d-free\n",(int)r);else vcls(r,"LOOP_CTL_GET_FREE");
+    close(f);
+  }else if(!strcmp(op,"pvm")&&argc==3){ /* process_vm_readv on init: verdict only, bytes never printed */
+    struct iovec l={NULL,16},r2={{0},16};
+    char local[16]; l.iov_base=local; r2.iov_base=(void*)0x400000L;
+    ssize_t n=process_vm_readv((pid_t)atoi(argv[2]),&l,1,&r2,1,0);
+    if(n>=0)rep("ALLOW","CRITICAL process_vm_readv-init");else vcls(-1,"process_vm_readv");
+  }else if(!strcmp(op,"pidfdgetfd")&&argc==3){
+#ifdef SYS_pidfd_open
+    int pfd=(int)syscall(SYS_pidfd_open,(pid_t)atoi(argv[2]),0);
+    if(pfd<0){vcls(pfd,"pidfd_open");return 0;}
+# ifdef SYS_pidfd_getfd
+    int nfd=(int)syscall(SYS_pidfd_getfd,pfd,0,0);
+    if(nfd>=0){rep("ALLOW","CRITICAL pidfd_getfd-init-fd");close(nfd);}else vcls(nfd,"pidfd_getfd");
+# else
+    rep("INCONCLUSIVE","pidfd_getfd-undefined-in-headers");
+# endif
+    close(pfd);
+#else
+    rep("INCONCLUSIVE","pidfd_open-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"iopl")){
+#if defined(__i386__)||defined(__x86_64__)
+    long r=iopl(0); /* level 0 = downgrade; permission check is unconditional */
+    if(r==0)rep("ALLOW","iopl-callable(CAP_SYS_IO)");else vcls(r,"iopl");
+#else
+    rep("INCONCLUSIVE","iopl-arch-unsupported");
+#endif
+  }else if(!strcmp(op,"clockset")){ /* nudges clock µs FORWARD, never back */
+    struct timespec ts;
+    if(clock_gettime(CLOCK_REALTIME,&ts)){vcls(-1,"clock_gettime");return 0;}
+    ts.tv_nsec=(ts.tv_nsec|0x3F)+1;
+    if(ts.tv_nsec>=1000000000L){ts.tv_nsec-=1000000000L;ts.tv_sec+=1;}
+    if(clock_settime(CLOCK_REALTIME,&ts)==0)rep("ALLOW","clock-settable(CAP_SYS_TIME)");else vcls(-1,"clock_settime");
+  }else if(!strcmp(op,"ptrace-sibling")){ /* attach to a same-uid NON-child process */
+    int pfd[2];if(pipe(pfd)){rep("INCONCLUSIVE","pipe-fail");return 0;}
+    pid_t mid=fork();
+    if(mid==0){
+      close(pfd[0]);
+      pid_t g=fork();
+      if(g==0){close(pfd[1]);sleep(30);_exit(0);} /* grandchild: sleeps, becomes sibling */
+      if(write(pfd[1],&g,sizeof g)!=(ssize_t)sizeof g)_exit(1);
+      close(pfd[1]);_exit(0);
+    }
+    close(pfd[1]);
+    pid_t g;ssize_t rn=read(pfd[0],&g,sizeof g);close(pfd[0]);
+    if(rn!=(ssize_t)sizeof g){rep("INCONCLUSIVE","pipe-read");return 0;}
+    int st;waitpid(mid,&st,0); /* intermediate gone: g is now a non-child sibling */
+    usleep(100000);
+    if(ptrace(PTRACE_ATTACH,g)==0){
+      waitpid(g,NULL,0);
+      ptrace(PTRACE_DETACH,g,0,0);
+      kill(g,SIGKILL);waitpid(g,NULL,0);
+      rep("ALLOW","sibling-attach(same-uid-non-child)");
+    }else{
+      printf("DENY errno=%d %s\n",errno,strerror(errno));
+      kill(g,SIGKILL);
+    }
   }else if(!strcmp(op,"ptrace-self")){
     pid_t p=fork();if(p==0){usleep(300000);_exit(0);}
     if(ptrace(PTRACE_ATTACH,p)==0){waitpid(p,NULL,0);ptrace(PTRACE_DETACH,p,0,0);rep("ALLOW","own-child(sanity)");}
-    else printf("DENY errno=%d\n",errno);
+    else vcls(-1,"attach-own-child");
   }else if(!strcmp(op,"ptrace-init")){
-    if(ptrace(PTRACE_ATTACH,1)==0){ptrace(PTRACE_DETACH,1,0,0);rep("ALLOW","CRITICAL-ptrace-init");}
-    else printf("DENY errno=%d %s\n",errno,strerror(errno));
+    if(ptrace(PTRACE_ATTACH,1)==0){waitpid(1,NULL,0);ptrace(PTRACE_DETACH,1,0,0);rep("ALLOW","CRITICAL-ptrace-init");}
+    else vcls(-1,"ptrace-init");
   }else if(!strcmp(op,"memhog")&&argc==3){
     size_t mb=(size_t)atoi(argv[2]);
     int*sh=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
@@ -219,7 +404,7 @@ int main(int argc,char**argv){
     if(WIFSIGNALED(st)&&WTERMSIG(st)==SIGKILL)printf("DENY memhog-SIGKILLED-at-~%dMB(memory.max)\n",sh[0]);
     else if(WIFEXITED(st))printf("ALLOW allocated-%dMB-uncapped\n",sh[0]);
     else printf("DENY memhog-other\n");
-  }else{rep("DENY","unknown-op");}
+  }else{rep("INCONCLUSIVE","unknown-op");}
   return 0;
 }
 CEOF
@@ -227,52 +412,59 @@ else
   echo "NOTE: no cc/gcc — kernel-syscall probes will be skipped (helper-unavailable)." >&2
 fi
 
-trap 'jobs -p | xargs -r kill 2>/dev/null; [ "$OUT_WAS_MNT" = 0 ] && umount "$OUT" 2>/dev/null' EXIT
+trap 'jobs -p | xargs -r kill 2>/dev/null
+      umount "$SCRATCH/mnt" "$SCRATCH/p" 2>/dev/null
+      [ "$OUT_WAS_MNT" = 0 ] && umount "$OUT" 2>/dev/null
+      rm -f "$OUT/snap" "$OUT/f" "$OUT/f1" 2>/dev/null
+      rm -rf "$SCRATCH" 2>/dev/null' EXIT
 
 # ============================ 0. PREFLIGHT ============================
 sec "0. PREFLIGHT"
 echo "kernel: $(uname -r)   date: $(date -u +%FT%TZ)"
+echo "uid: $(id -u 2>/dev/null)   $(grep -m1 '^CapEff:' /proc/self/status 2>/dev/null | tr -s '\t' ' ')"
+rm -rf "$SAN"
 hcheck landlock-abi info landlock-abi
-# sanity: if these "fail", IN/OUT are reversed and every verdict is garbage
-check sanity-in-mkdir    allow mkdir -p "$IN/sanity"
-check sanity-in-write    allow sh -c "echo x > '$IN/sanity/f'"
+# sanity: if these "fail", IN/OUT are reversed or IN is unusable — verdicts unreliable
+check sanity-in-mkdir    allow mkdir -p "$SAN"
+check sanity-in-write    allow sh -c "echo x > \"\$1/f\"" sh "$SAN"
 check sanity-execute-true info /bin/true
+if [ "${GOT[sanity-in-mkdir]:-}" != allow ] || [ "${GOT[sanity-in-write]:-}" != allow ]; then
+  echo "WARNING: IN-dir sanity failed — in/out dirs likely reversed or unusable; treat all verdicts as suspect." >&2
+fi
+rec info-seccomp-status info allow "$(grep -m2 -E '^(Seccomp|NoNewPrivs):' /proc/self/status 2>/dev/null | tr -s '\n\t:' '   ')"
 
 # ===================== 1. FS ACCESS OUT OF POLICY =====================
 sec "1. FS operations on OUT (expected deny)"
 check out-mkdir       deny mkdir -p "$OUT/d1"
 check out-creat       deny touch "$OUT/f1"
-check out-write       deny sh -c "echo x > '$OUT/f1'"
-check out-append      deny sh -c "echo x >> '$OUT/f1'"
+check out-write       deny sh -c "echo x > \"\$1/f1\"" sh "$OUT"
+check out-append      deny sh -c "echo x >> \"\$1/f1\"" sh "$OUT"
 check out-truncate    deny truncate -s 1 "$OUT/f1"
 if [ -f "$SEED" ]; then
   check out-unlink     deny rm "$SEED"          # operator-seeded; rm -f would mask ENOENT as ALLOW
+  ln -sf "$SEED" "$SAN/seedlnk"                 # readable out-of-policy file reached
+  check out-symlink-read deny sh -c 'dd if="\$1" bs=1 count=1 2>/dev/null && echo readable' sh "$SAN/seedlnk"   # deny resolution; content stays out of telemetry
 else
   rec out-unlink info skip "seed $SEED operator-side to enable"
+  rec out-symlink-read info skip "seed $SEED operator-side to enable"
 fi
-check out-read-etc-passwd  info cat /etc/passwd
-check out-read-etc-hostname info cat /etc/hostname
-check out-read-shadow      deny cat /etc/shadow
-check out-read-ssh-hostkey deny cat /etc/ssh/ssh_host_ed25519_key
-check out-read-root-ssh    deny cat /root/.ssh/id_rsa
+check out-read-etc-passwd  info sh -c 'head -c 60 /etc/passwd 2>&1'
+check out-read-etc-hostname info sh -c 'head -c 60 /etc/hostname 2>&1'
+check out-read-shadow      deny sh -c 'dd if=/etc/shadow bs=1 count=1 2>/dev/null && echo readable'          # verdict only: no content in telemetry
+check out-read-ssh-hostkey deny sh -c 'dd if=/etc/ssh/ssh_host_ed25519_key bs=1 count=1 2>/dev/null && echo readable'
+check out-read-root-ssh    deny sh -c 'dd if=/root/.ssh/id_rsa bs=1 count=1 2>/dev/null && echo readable'
 
 # ===================== 2. FS CREATION CLASSES =========================
 sec "2. Creation classes (in-policy sanity / out-of-policy deny)"
-check in-mkfifo       allow mkfifo "$IN/sanity/fifo"
-check in-symlink      allow ln -sf /etc/hostname "$IN/sanity/lnk"
-check in-exec-home    info sh -c 'cp /bin/true "$1/true" && "$1/true" && echo EXEC-OK' sh "$IN"
-if [ -f "$SEED" ]; then                                  # readable file OUT of policy, reached
-  ln -sf "$SEED" "$IN/sanity/seedlnk"                   # through an IN-policy symlink: policy
-  check out-symlink-read deny cat "$IN/sanity/seedlnk"   # must deny resolution, not file perms
-else
-  rec out-symlink-read info skip "seed $SEED operator-side to enable"
-fi
-check out-hardlink    deny ln /etc/hostname "$IN/sanity/hl"        # cross-boundary link
-check out-rename      deny mv "$IN/sanity/f" "$OUT/f"
+check in-mkfifo       allow mkfifo "$SAN/fifo"
+check in-symlink      allow ln -sf /etc/hostname "$SAN/lnk"
+check in-exec-home    info sh -c 'cp /bin/true "$1/true" && "$1/true" && echo EXEC-OK' sh "$SAN"
+check out-hardlink    deny ln /etc/hostname "$SAN/hl"             # cross-boundary link
+check out-rename      deny mv "$SAN/f" "$OUT/f"
 if have btrfs; then
-  check in-btrfs-subvol allow btrfs subvolume create "$IN/sanity/subvol"
+  check in-btrfs-subvol allow btrfs subvolume create "$SAN/subvol"
   check out-btrfs-subvol deny btrfs subvolume create "$OUT/subvol"   # the known CVE class
-  check out-btrfs-snap  deny btrfs subvolume snapshot "$IN/sanity" "$OUT/snap"
+  check out-btrfs-snap  deny btrfs subvolume snapshot "$SAN" "$OUT/snap"
 else
   rec in-btrfs-subvol info skip "no btrfs tool"; rec out-btrfs-subvol info skip "no btrfs tool"; rec out-btrfs-snap info skip "no btrfs tool"
 fi
@@ -280,34 +472,37 @@ fi
 # ===================== 3. IOCTL-DRIVEN BYPASS CLASS ===================
 sec "3. ioctl-driven operations (hook-coverage gaps)"
 if have cp; then
-  check out-reflink    deny cp --reflink=always "$IN/sanity/f" "$OUT/f"
+  check out-reflink    deny cp --reflink=always "$SAN/f" "$OUT/f"
 fi
+hcheck out-ficlone    deny ficlone "$SAN/f" "$OUT/f"              # FICLONE ioctl across the boundary
 if have chattr; then
-  if chattr +i "$IN/sanity/f" 2>/dev/null; then
+  if chattr +i "$SCRATCH/f" 2>/dev/null; then
     rec in-chattr-immutable info allow "ioctl FS_IOC_SETFLAGS permitted"
-    chattr -i "$IN/sanity/f" 2>/dev/null
+    chattr -i "$SCRATCH/f" 2>/dev/null
   else rec in-chattr-immutable info deny "FS_IOC_SETFLAGS refused"; fi
 else rec in-chattr-immutable info skip "no chattr"; fi
-if have mkswap && have swapon; then
-  dd if=/dev/zero of="$IN/sanity/swap" bs=1M count=8 status=none
-  mkswap "$IN/sanity/swap" >/dev/null 2>&1
-  check out-swapon deny swapon "$IN/sanity/swap"   # CAP_SYS_ADMIN probe
-  swapoff "$IN/sanity/swap" 2>/dev/null || true
-fi
-hcheck helper-mknod-open   deny mknodopen "$IN/sanity/dev-null-clone"  # mknod then READ it
-hcheck helper-open-byhandle deny byhandle "$IN/sanity/f"               # CAP_DAC_READ_SEARCH probe
-# note: generic FICLONE/FIDEDUPERANGE on restricted src, TIOCSTI, loop-device
-# ioctls are further ioctl classes; covered partially above, rest need fd setup.
+if [ "${LANDSCAN_SWAP:-0}" = 1 ] && have mkswap && have swapon; then
+  dd if=/dev/zero of="$SCRATCH/swap" bs=1M count=8 status=none
+  mkswap "$SCRATCH/swap" >/dev/null 2>&1
+  check out-swapon deny swapon "$SCRATCH/swap"   # CAP_SYS_ADMIN probe — HOST-GLOBAL if allowed
+  swapoff "$SCRATCH/swap" 2>/dev/null
+  rm -f "$SCRATCH/swap"
+else rec out-swapon info skip "gated(off) — LANDSCAN_SWAP=1 to enable"; fi
+hcheck helper-mknod-open   deny mknodopen "$SAN/dev-null-clone"  # mknod then READ it
+hcheck helper-open-byhandle deny byhandle "$SAN/f"                # CAP_DAC_READ_SEARCH probe
+hcheck helper-loopctl      info loopctl                              # loop-device reachability
+hcheck helper-tiocsti      deny tiocsti                              # keystroke-injection ioctl
 
 # ===================== 4. MOUNT / NAMESPACE ===========================
 sec "4. Mount & namespace (expected deny)"
-check mnt-bind        deny mount --bind "$IN/sanity" "$OUT"
-check mnt-tmpfs       deny sh -c 'mkdir -p "$1/mnt" && mount -t tmpfs none "$1/mnt"' sh "$IN"
-check mnt-proc        deny sh -c 'mkdir -p "$1/p" && mount -t proc proc "$1/p"' sh "$IN"
+check mnt-bind        deny mount --bind "$SCRATCH" "$OUT"
+check mnt-tmpfs       deny sh -c 'mkdir -p "$1/mnt" && mount -t tmpfs none "$1/mnt"' sh "$SCRATCH"
+check mnt-proc        deny sh -c 'mkdir -p "$1/p" && mount -t proc proc "$1/p"' sh "$SCRATCH"
 check ns-unshare-m    deny unshare -m true
+check ns-unshare-U    deny unshare -U true
 check ns-unshare-ur   deny unshare -U -r true
 check ns-unshare-net  deny unshare -n true
-check ns-chroot       deny sh -c 'cp /bin/true "$1/" 2>/dev/null; chroot "$1" /true' sh "$IN"  # CAP_SYS_CHROOT probe
+hcheck ns-chroot      deny chroot "$SCRATCH"          # chroot(2) itself is the signal (no exec needed)
 hcheck helper-setns-mnt deny setns /proc/1/ns/mnt
 
 # ===================== 5. PROC/SYS & KERNEL KNOBS =====================
@@ -317,10 +512,13 @@ kwriteback knob-modprobe     /proc/sys/kernel/modprobe
 if [ "${LANDSCAN_SYSRQ:-0}" = 1 ]; then
   check knob-sysrq-h deny sh -c "echo h > /proc/sysrq-trigger"   # 'h'=help, harmless
 fi
+if [ "${LANDSCAN_TIME:-0}" = 1 ]; then
+  hcheck knob-clock-settime deny clockset        # nudges clock µs forward, never back
+else rec knob-clock-settime info skip "gated(off) — LANDSCAN_TIME=1 to enable"; fi
 check read-kcore      deny sh -c "head -c1 /proc/kcore"
 check read-kallsyms   info head -c1 /proc/kallsyms
-check read-init-env   deny cat /proc/1/environ
-check read-init-cmdline info cat /proc/1/cmdline
+check read-init-env   deny sh -c 'f=/proc/1/environ; if [ -r "$f" ]; then printf "readable %s bytes sha256:%s\n" "$(wc -c <"$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-16)"; else cat "$f"; fi'  # verdict only: NEVER copy env content into telemetry
+check read-init-cmdline info sh -c 'tr "\\0" " " < /proc/1/cmdline 2>&1 | head -c 60'
 check read-self-caps  info sh -c "grep Cap /proc/self/status"
 
 # ===================== 6. KERNEL SUBSYSTEM SYSCALLS ===================
@@ -337,17 +535,23 @@ hcheck ks-kexec        deny kexec
 sec "7. Device nodes"
 hcheck dev-kmsg-open   deny openw /dev/kmsg
 hcheck dev-mem-open    deny openw /dev/mem
+hcheck dev-kmem-open   deny openw /dev/kmem
+hcheck dev-port-open   deny openw /dev/port
 hcheck dev-console-open deny openw /dev/console
 hcheck dev-ldpreload-open deny openw /etc/ld.so.preload
 [ -S /var/run/docker.sock ] && hcheck dev-docker-sock deny openw /var/run/docker.sock
 
 # ===================== 8. PROCESS / IPC ===============================
 sec "8. Process & IPC"
-hcheck ipc-ptrace-child allow ptrace-self
-hcheck ipc-ptrace-init  deny ptrace-init
+hcheck ipc-ptrace-child  allow ptrace-self
+hcheck ipc-ptrace-sibling info ptrace-sibling   # same-uid NON-child: the agent-to-agent case
+hcheck ipc-ptrace-init   deny ptrace-init
+hcheck ipc-pvm-init      deny pvm 1             # process_vm_readv on init (bytes never printed)
+hcheck ipc-pidfd-getfd   deny pidfdgetfd 1      # steal fds from init
 check proc-kill0-init  info kill -0 1
 check proc-1-ns-open   deny sh -c "exec 3< /proc/1/ns/mnt"
 hcheck net-abstract-bind info abstract landscan-probe
+hcheck fs-landlock-compose allow llcompose        # self-restriction must stack, not break
 
 # ===================== 9. PRIVILEGE RECON =============================
 sec "9. Privilege surface (informational)"
@@ -360,41 +564,53 @@ sec "10. Resource limits (config: memory=4g cpus=2 pids=512)"
 for f in memory.max memory.current pids.max cpu.max io.max io.stat; do
   [ -r "/sys/fs/cgroup/$f" ] && printf '  cgroup %-16s %s\n' "$f" "$(head -c 80 /sys/fs/cgroup/$f | tr '\n' ' ')"
 done
+for f in /sys/fs/cgroup/pids/pids.max; do   # cgroup v1
+  [ -r "$f" ] && printf '  cgroup %-16s %s\n' "pids/pids.max" "$(head -c 80 "$f" | tr '\n' ' ')"
+done
 hcheck rsrc-memhog     deny memhog "${LANDSCAN_MEMHOG_MB:-6144}"
-PIDS_MAX=$(head -c8 /sys/fs/cgroup/pids.max 2>/dev/null || echo 600)
+PIDS_MAX=${LANDSCAN_PIDS_PROBE:-}
+if [ -z "$PIDS_MAX" ]; then
+  PIDS_MAX=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || cat /sys/fs/cgroup/pids/pids.max 2>/dev/null || echo 600)
+fi
 case "$PIDS_MAX" in ''|*[!0-9]*) PIDS_MAX=600;; esac   # also catches 'max'
 [ "$PIDS_MAX" -gt 900 ] && PIDS_MAX=900
-n=0; i=0
-while [ $i -lt $((PIDS_MAX + 100)) ]; do
-  sleep 20 2>/dev/null & n=$((n+1)); i=$((i+1))
-  [ "$(jobs -r | wc -l)" -ge "$PIDS_MAX" ] && break
+[ "$PIDS_MAX" -lt 5 ] && PIDS_MAX=5
+n=0
+while [ "$n" -lt "$PIDS_MAX" ]; do
+  before=$(jobs -r | wc -l)
+  sleep 20 2>/dev/null &
+  after=$(jobs -r | wc -l)
+  if [ "$after" -le "$before" ]; then break; fi        # fork failed: at the real ceiling; do NOT retry-stall
+  n=$after
 done
 sleep 1
-rec rsrc-pids-ceiling info allow "forked $n before stall (pids.max=$PIDS_MAX) — compare vs config pids=512"
+rec rsrc-pids-ceiling info allow "forked $n before stall (assumed ceiling=$PIDS_MAX) — compare vs config pids=512"
 jobs -p | xargs -r kill 2>/dev/null; wait 2>/dev/null
 FILL_MB=${LANDSCAN_FILL_MB:-2048}
-if have dd && have timeout; then
-  out=$(timeout 60 dd if=/dev/zero of="$IN/fill" bs=1M count="$FILL_MB" 2>&1 | tail -1)
-  rec rsrc-disk-fill info allow "$out (expect EDQUOT/ENOSPC if quota exists)"; rm -f "$IN/fill"
+if have dd; then
+  out=$(timeout 60 dd if=/dev/zero of="$SCRATCH/fill" bs=1M count="$FILL_MB" 2>&1 | tail -1)
+  rec rsrc-disk-fill info allow "$out (expect EDQUOT/ENOSPC if quota exists)"; rm -f "$SCRATCH/fill"
 fi
 
 # ==================== 11. EGRESS CHANNEL MAP ==========================
 sec "11. Egress channel map (informational; config allows 80/443/8443)"
 CAN=${LANDSCAN_CANARY:-canary.invalid}
-tcp_probe(){ timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null && echo open || echo closed; }
+tcp_probe(){ if timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; then echo open; else echo closed; fi; }
 for p in 80 443 8443 22 9999; do
-  rec "net-tcp-$p" info allow "$(tcp_probe "$CAN" $p) → $CAN:$p"
+  rec "net-tcp-$p" info "$(tcp_probe "$CAN" $p)" "→ $CAN:$p"
 done
 if have curl; then
-  rec net-doh info allow "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' 'https://1.1.1.1/dns-query?name=example.com' 2>/dev/null || echo blocked) DoH-over-443"
-  rec net-metadata info allow "$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' http://169.254.169.254/ 2>/dev/null || echo blocked) cloud-metadata"
+  code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' 'https://1.1.1.1/dns-query?name=example.com' 2>/dev/null); [ "$code" = 000 ] && code=blocked
+  rec net-doh info allow "$code DoH-over-443"
+  mcode=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' http://169.254.169.254/ 2>/dev/null); [ "$mcode" = 000 ] && mcode=blocked
+  rec net-metadata info allow "$mcode cloud-metadata"
 else
   rec net-doh info skip "no curl"; rec net-metadata info skip "no curl"
 fi
 rec net-dns-udp info allow "$(getent hosts example.com >/dev/null 2>&1 && echo resolving || echo no-resolve) arbitrary-DNS"
 have dig && rec net-dns-arbitrary-ns info allow "$(dig +short @1.1.1.1 example.com >/dev/null 2>&1 && echo reachable || echo blocked) direct-NS-query"
 for port in 2375 2376 8080 9090; do
-  rec "net-local-$port" info allow "$(tcp_probe 127.0.0.1 $port) localhost-daemon"
+  rec "net-local-$port" info "$(tcp_probe 127.0.0.1 $port) localhost-daemon"
 done
 hcheck net-rawsock deny rawsock
 hcheck net-pktsock deny pktsock
@@ -407,19 +623,21 @@ tot=${#ORDER[@]}
 echo "checks: $tot · as-expected/info: $((tot-UNEX)) · UNEXPECTED:$UNEX"
 [ $UNEX -gt 0 ] && echo "investigate:$UNEXLIST"
 if [ -n "$BASELINE" ]; then
-  : > "$BASELINE"
   for n in "${ORDER[@]}"; do printf '%s\t%s\t%s\n' "$n" "${GOT[$n]}" "${DETAIL[$n]}" >> "$BASELINE"; done
   echo "baseline written: $BASELINE"
 fi
-if [ -n "$CHECK" ] && [ -r "$CHECK" ]; then
+if [ -n "$CHECK" ]; then
   echo "--- diff vs baseline $CHECK ---"
   declare -A OLD
-  while IFS=$'\t' read -r n g d; do OLD[$n]="$g"; done < "$CHECK"
+  while IFS=$'\t' read -r n g d; do [ -n "${n:-}" ] && OLD[$n]="$g"; done < "$CHECK"
   for n in "${ORDER[@]}"; do
     o=${OLD[$n]:-}; g=${GOT[$n]}; w=${OVR[$n]:-${WANT[$n]}}
     [ -z "$o" ] && { echo "  NEW      $n ($g)"; continue; }
     [ "$o" = "$g" ] && continue
-    if [ "$g" = "$w" ]; then echo "  IMPROVED $n: $o → $g"; else echo "  REGRESSION $n: $o → $g"; fi
+    if [ "$g" = "$w" ]; then echo "  IMPROVED $n: $o → $g"
+    elif [ "$o" = "$w" ]; then echo "  REGRESSION $n: $o → $g"
+    else echo "  CHANGED  $n: $o → $g"; fi
   done
 fi
+echo "SWEEP COMPLETE"
 exit $([ $UNEX -eq 0 ] && echo 0 || echo 1)
