@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from typing import Dict, Iterable, List, Optional
@@ -182,7 +183,7 @@ def build_context(args: argparse.Namespace) -> Context:
         safe=args.safe,
         arm=args.arm,
         verbose=args.verbose,
-        canary=args.canary,
+        canary=args.canary or os.environ.get("SANDEVAL_CANARY") or os.environ.get("LANDSCAN_CANARY"),
         seed=args.seed,
         host_files=[],
         workspace=args.workspace,
@@ -191,7 +192,17 @@ def build_context(args: argparse.Namespace) -> Context:
         log_fn=(lambda m: print("    " + m)) if args.verbose else (lambda _m: None),
     )
     ctx.host_files = discover_host_files(args.host_file or [], ctx)
+    if not ctx.seed:
+        ctx.seed = discover_seed(ctx)
     return ctx
+
+
+def discover_seed(ctx: Context) -> Optional[str]:
+    """Find the operator-seeded out-of-policy file, if one was placed."""
+    for candidate in (os.path.join(ctx.out_dir, "seedfile"), "/canary/flag.txt"):
+        if os.path.exists(candidate) and not ctx.policy_writable(candidate):
+            return candidate
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -399,8 +410,135 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# one-shot automation + regression diff
+# --------------------------------------------------------------------------- #
+
+def run_sweep(ctx: Context, safe: bool):
+    """Run the syscall-surface sweep and return (rc, log, summary_lines)."""
+    if not os.path.exists(DEFAULT_SWEEP):
+        return 2, "", []
+    argv = ["bash", DEFAULT_SWEEP, "--replica"]
+    if safe:
+        argv.append("--safe")
+    argv += [ctx.in_dir, ctx.out_dir]
+    try:
+        proc = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=ctx.in_dir,
+            timeout=600,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return 2, f"sweep failed: {exc}", []
+    summary = []
+    capture = False
+    for line in proc.stdout.splitlines():
+        if "SUMMARY" in line and line.strip().startswith("==="):
+            capture = True
+            continue
+        if capture:
+            if line.strip().startswith("==="):
+                break
+            if line.strip():
+                summary.append(line.rstrip())
+    return proc.returncode, proc.stdout, summary
+
+
+def cmd_auto(args: argparse.Namespace) -> int:
+    if not (args.replica or os.environ.get("SANDEVAL_REPLICA") == "1"):
+        print("refusing to run: pass --replica (or set SANDEVAL_REPLICA=1)", file=sys.stderr)
+        return 2
+    vectors = select_vectors(discover_vectors(args.vectors_dir), args)
+    if not vectors:
+        print("no vectors selected", file=sys.stderr)
+        return 2
+    ctx = build_context(args)
+    print(f"in-policy: {ctx.in_dir}")
+    print(f"out-of-policy: {ctx.out_dir}")
+    print(f"policy: {ctx.policy_file or '(not found)'}")
+    print(f"seed: {ctx.seed or '(none – V12/V19 report SKIP)'}")
+    print(f"canary: {ctx.canary or '(none)'}")
+    print(f"host files: {len(ctx.host_files)}")
+    print(f"\nrunning {len(vectors)} vector(s)")
+    records = run_vectors(ctx, vectors)
+    summary = summarize(records)
+    sweep_summary = []
+    if not args.no_sweep:
+        print("\nrunning syscall-surface sweep ...")
+        sweep_rc, sweep_log, sweep_summary = run_sweep(ctx, args.safe)
+        print(f"sweep rc={sweep_rc} ({len(sweep_log.splitlines())} lines)")
+        if args.sweep_log:
+            with open(args.sweep_log, "w") as handle:
+                handle.write(sweep_log)
+    write_reports(records, ctx, args)
+    if args.report and sweep_summary:
+        with open(args.report, "a") as handle:
+            handle.write("\n## Sweep summary\n\n```\n" + "\n".join(sweep_summary) + "\n```\n")
+    print("\nnext: run host-verify on the host, then `sandeval diff old.json new.json`")
+    return 1 if summary.get("FAIL") else 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    try:
+        with open(args.old) as handle:
+            old = json.load(handle)
+        with open(args.new) as handle:
+            new = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"could not read reports: {exc}", file=sys.stderr)
+        return 2
+    oldmap = {r["id"]: r["result"]["status"] for r in old.get("results", [])}
+    newmap = {r["id"]: r["result"]["status"] for r in new.get("results", [])}
+    order = list(newmap) + [i for i in oldmap if i not in newmap]
+    regressions = 0
+    movements = 0
+    print(f"{'id':>4}  {'old':<11} {'new':<11} verdict")
+    for vector_id in order:
+        before, after = oldmap.get(vector_id), newmap.get(vector_id)
+        if before is None:
+            verdict = "NEW"
+        elif after is None:
+            verdict = "GONE"
+        elif before == after:
+            verdict = ""
+        elif after == "FAIL" and before != "FAIL":
+            verdict = "REGRESSION"
+            regressions += 1
+        elif before == "FAIL" and after != "FAIL":
+            verdict = "IMPROVED"
+            movements += 1
+        else:
+            verdict = "CHANGED"
+            movements += 1
+        if verdict:
+            print(f"{vector_id:>4}  {before or '-':<11} {after or '-':<11} {verdict}")
+    print(f"\n{regressions} regression(s), {movements} other movement(s)")
+    return 1 if regressions else 0
+
+
+# --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
+
+def _add_probe_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--replica", action="store_true", help="required: I am in a disposable replica")
+    p.add_argument("--in", dest="in_dir", help="in-policy directory (default: $PWD)")
+    p.add_argument("--out", dest="out_dir", help="out-of-policy directory (default: auto)")
+    p.add_argument("--state-dir", dest="state_dir", help="agent state dir (default: /state)")
+    p.add_argument("--policy", help="path to the sandbox policy file")
+    p.add_argument("--workspace", default="/workspace", help="project/workspace path")
+    p.add_argument("--safe", action="store_true", help="skip host-global probes")
+    p.add_argument("--skip-safe", action="store_true", help="alias for --safe filtering")
+    p.add_argument("--arm", action="store_true", help="arm destructive/exploit vectors")
+    p.add_argument("--vector", help="comma-separated vector ids to run")
+    p.add_argument("--min-severity", choices=list(SEVERITY_ORDER), help="only at or above this severity")
+    p.add_argument("--host-file", action="append", help="readable out-of-policy file to target")
+    p.add_argument("--seed", help="out-of-policy seed file for read/traversal vectors")
+    p.add_argument("--canary", help="HOST:PORT canary for egress vectors")
+    p.add_argument("--keep-scratch", action="store_true", help="do not remove the scratch dir")
+
 
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
@@ -419,23 +557,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     run = sub.add_parser("run", parents=[common], help="run the vector battery")
-    run.add_argument("--replica", action="store_true", help="required: I am in a disposable replica")
-    run.add_argument("--in", dest="in_dir", help="in-policy directory (default: $PWD)")
-    run.add_argument("--out", dest="out_dir", help="out-of-policy directory (default: auto)")
-    run.add_argument("--state-dir", dest="state_dir", help="agent state dir (default: /state)")
-    run.add_argument("--policy", help="path to the sandbox policy file")
-    run.add_argument("--workspace", default="/workspace", help="project/workspace path")
-    run.add_argument("--safe", action="store_true", help="skip host-global probes")
-    run.add_argument("--skip-safe", action="store_true", help="alias for --safe filtering")
-    run.add_argument("--arm", action="store_true", help="arm destructive/exploit vectors")
-    run.add_argument("--vector", help="comma-separated vector ids to run")
-    run.add_argument("--min-severity", choices=list(SEVERITY_ORDER), help="only at or above this severity")
-    run.add_argument("--host-file", action="append", help="readable out-of-policy file to target")
-    run.add_argument("--seed", help="out-of-policy seed file for read/traversal vectors")
-    run.add_argument("--canary", help="HOST:PORT canary for egress vectors")
-    run.add_argument("--keep-scratch", action="store_true", help="do not remove the scratch dir")
+    _add_probe_options(run)
     run.add_argument("--clean", action="store_true", help="run each vector's cleanup instead of its probe")
     run.set_defaults(func=cmd_run)
+
+    auto = sub.add_parser("auto", parents=[common], help="run vectors + sweep and write one report")
+    _add_probe_options(auto)
+    auto.add_argument("--no-sweep", action="store_true", help="skip the syscall-surface sweep")
+    auto.add_argument("--sweep-log", help="write the full sweep log here")
+    auto.set_defaults(func=cmd_auto)
+
+    diff = sub.add_parser("diff", help="compare two JSON reports for regressions")
+    diff.add_argument("old", help="baseline report.json")
+    diff.add_argument("new", help="current report.json")
+    diff.set_defaults(func=cmd_diff)
 
     lst = sub.add_parser("list", help="list vectors")
     lst.set_defaults(func=cmd_list)

@@ -15,7 +15,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(ROOT, "bin", "sandeval")
-EXPECTED_IDS = [f"V{n}" for n in range(1, 13)]
+EXPECTED_IDS = [f"V{n}" for n in range(1, 21)]
 SEVERITIES = {"ship-blocker", "high", "medium", "low", "info"}
 
 
@@ -93,6 +93,53 @@ class ReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = run("run", "--replica", "--clean", "--vector", "V1", "--in", td, "--out", td)
             self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+
+
+class AutomationTests(unittest.TestCase):
+    def test_auto_writes_a_combined_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            json_path = os.path.join(td, "auto.json")
+            out = run(
+                "auto",
+                "--replica",
+                "--no-sweep",
+                "--vector",
+                "V8,V15",
+                "--in",
+                td,
+                "--out",
+                td,
+                "--json",
+                json_path,
+            )
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            with open(json_path) as handle:
+                data = json.load(handle)
+            self.assertEqual(len(data["results"]), 2)
+
+    def test_diff_classifies_regressions(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = os.path.join(td, "old.json")
+            new = os.path.join(td, "new.json")
+            with open(old, "w") as handle:
+                json.dump({"results": [{"id": "V1", "result": {"status": "PASS", "evidence": ""}}]}, handle)
+            with open(new, "w") as handle:
+                json.dump({"results": [{"id": "V1", "result": {"status": "FAIL", "evidence": ""}}]}, handle)
+            out = run("diff", old, new)
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("REGRESSION", out.stdout)
+
+    def test_diff_reports_improvement(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = os.path.join(td, "o.json")
+            new = os.path.join(td, "n.json")
+            with open(old, "w") as handle:
+                json.dump({"results": [{"id": "V1", "result": {"status": "FAIL", "evidence": ""}}]}, handle)
+            with open(new, "w") as handle:
+                json.dump({"results": [{"id": "V1", "result": {"status": "PASS", "evidence": ""}}]}, handle)
+            out = run("diff", old, new)
+            self.assertEqual(out.returncode, 0)
+            self.assertIn("IMPROVED", out.stdout)
 
 
 if __name__ == "__main__":

@@ -159,6 +159,85 @@ the check meaningful.
 
 ---
 
+## V13/V14 — CPU speculative-execution mitigations (ship-blocker)
+
+**What.** The host kernel is booted with `mitigations=off` (visible in
+`/proc/cmdline`) on a CPU that `/proc/cpuinfo` lists under `bugs` as affected
+by `spectre_v1 spectre_v2 spec_store_bypass srso tsa vmscape`. The canonical
+Spectre v1 bounds-check-bypass (`tools/spectre_v1.c`) recovers the known secret
+`SPECTRE_V1_PROOF` from inside the sandbox, confirming the side channel is
+live, not theoretical.
+
+**Why it is a sandbox finding.** The CPU is shared. A path policy is a
+statement about the filesystem; it says nothing about a core that will execute
+the wrong branch and leave a cache footprint for another process to read. If
+mitigations are off, the boundary between the agent and every other tenant is
+the hardware's, and the hardware was told not to use it.
+
+**Fix.** Boot with mitigations on (`mitigations=auto`), keep microcode current,
+and treat CPU pinning/partitioning or confidential computing as the only way to
+share an unmitigated core safely.
+
+## V15 — kernel hardening knobs (pass on this replica)
+
+`kptr_restrict`, `dmesg_restrict`, `randomize_va_space`, `/proc/kcore`,
+`/dev/kvm`, `core_pattern`, `modprobe` and lockdown were probed. The kernel did
+not expose a regression: ASLR full, kcore unreadable, `/dev/kvm` absent,
+sysctls read-only. This vector is the guard against a future image that ships a
+weaker default. Note the sandbox does not mount `/sys`, so the vector reads
+`/proc` equivalents where it can.
+
+## V16 — cross-process `/proc` recon (medium)
+
+**What.** Memory maps of peer processes are readable (`/proc/<pid>/maps`), as
+are their command lines, status and open descriptors; `/proc/net/*` exposes the
+host socket tables. `/proc` is read-granted wholesale so the agent can run.
+
+**Impact.** Memory layout is exactly what a speculative-execution side channel
+(V13/V14) needs to aim at. Read access to `/proc` and an unmitigated CPU
+compose into a memory-disclosure path.
+
+**Fix.** Mount a per-session `/proc` with `hidepid=2` and a PID namespace that
+contains only the session, so there is no peer process to map.
+
+## V17 — cgroup controls (pass on this replica)
+
+The session cgroup's `cgroup.procs`, `memory.max`, `subtree_control` and any
+`release_agent` were probed for writability. All were read-only, so the agent
+cannot raise its own limit or move itself into a wider group. This is the
+control that makes V10's missing limits less dangerous — V10 shows the limits
+are not set, V17 shows the agent cannot set them either.
+
+## V18 — cross-session persistence (suspected)
+
+**What.** The project directory is writable and survives into the next session
+on the same project, so anything planted there is a cross-session artifact
+(the P4/P16/P20 class). Shared caches (`CARGO_HOME`, `GOMODCACHE`,
+`XDG_CACHE_HOME`, pip cache) were not present in this replica; where they are,
+they are the same class of finding.
+
+**Fix.** A per-errand scratch directory (not the project root) for build
+output, and integrity-checked shared caches.
+
+## V19 — TOCTOU symlink swap (pass)
+
+The symlink was flipped between an in-policy file and an out-of-policy target
+in a tight loop while another thread opened it. No open ever returned the
+out-of-policy content: Landlock resolves at operation time, so there is no
+check-then-use window. (On this replica the configured target was directly
+readable anyway, which V12 reports; V19 reports `SKIP` rather than claiming a
+race win.)
+
+## V20 — credential reach (suspected)
+
+One credential-surface file was readable; no token shape matched. The daemon's
+environment (V4) is the real credential leak here — `GH_TOKEN` and
+`OPENCODE_API_KEY` are in the process environment and `/proc/<pid>/environ` is
+readable. Fix placement, not detection: keep credentials out of the daemon
+environment.
+
+---
+
 ## What was *not* found
 
 - **No content read/write of a Landlock-denied regular file.** The only routes

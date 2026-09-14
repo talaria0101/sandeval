@@ -1,28 +1,35 @@
 # Changelog
 
+## v5.0.0 — Spectre layer + automation
+
+- **New:** `sandeval auto` — vectors + syscall sweep in one run, one combined
+  report; `sandeval diff old.json new.json` with REGRESSION/IMPROVED/CHANGED/
+  NEW/GONE classification; `run-all.sh` zero-config wrapper.
+- **New vectors:** V13 CPU speculative-execution mitigations (reads
+  `/proc/cmdline` `mitigations=off` and `/proc/cpuinfo` `bugs`; falls back to
+  `/sys/.../vulnerabilities`), V14 live Spectre v1 PoC, V15 kernel hardening
+  knobs, V16 cross-process `/proc` recon, V17 cgroup controls, V18 cross-session
+  persistence, V19 TOCTOU symlink race, V20 credential reach.
+- **New:** `tools/spectre_v1.c` — canonical bounds-check-bypass with
+  Flush+Reload (build `-O2`, volatile sink).
+- **New:** host verifier reports the host CPU's own Spectre status from
+  `/sys/devices/system/cpu/vulnerabilities/*`.
+- **New:** `.github/workflows/sandeval.yml` runs syntax, self-tests, catalogue
+  and a smoke run in CI.
+- **Changed:** seed discovery (`$OUT/seedfile`, `/canary/flag.txt`), canary from
+  `SANDEVAL_CANARY`/`LANDSCAN_CANARY`.
+- **Tests:** 8 harness tests (discovery, refusal, report schema, `auto`, `diff`).
+
 ## v4.0.0 — vector evaluator
 
-The kit becomes a single runnable evaluator instead of a sweep plus a document.
-
-- **New:** `bin/sandeval` runner (Python stdlib only) with `run`, `list`,
-  `prompts`, `sweep` and `host-verify` subcommands, JSON and Markdown reports,
-  and a plugin vector registry (`vectors/v*.py`).
-- **New:** twelve deterministic vectors covering inode metadata, xattrs, tmpfs,
-  `/proc` environment, orchestrator stdio, user-namespace `clone`, egress
-  channels, git-native host execution, seccomp conformance, resource bounds,
-  inotify watches and out-of-policy reads.
-- **New:** `host-verify/verify.sh` — the host-side scoring step, with `--clean`.
-- **New:** `docs/findings.md` (state of each finding + remediation),
-  `docs/methodology.md`, `docs/results-format.md`.
-- **New:** `tools/userns_clone.c` raw-syscall helper.
-- **Moved:** `landlock-surface-sweep.sh` → `sweep/`,
-  `redteam-eval-harness.md` → `prompts/`, `HANDOFF.md` →
-  `docs/HANDOFF-sweep-v4.md`.
-- **Changed:** `run.sh` is the zero-config entry point; `--replica` is required
-  for `run` and `sweep`.
-- **Tests:** `tests/test_harness.py` validates discovery, metadata, the refusal
-  path and the report schema; `tests/run-tests.sh` keeps the sweep self-tests
-  and runs the Python suite.
+- **New:** `bin/sandeval` runner (Python stdlib) with `run`, `list`, `prompts`,
+  `sweep`, `host-verify`; JSON and Markdown reports; plugin vector registry.
+- **New:** twelve deterministic vectors V1–V12.
+- **New:** `host-verify/verify.sh` (host-side scoring, `--clean`),
+  `docs/findings.md`, `docs/methodology.md`, `docs/results-format.md`,
+  `tools/userns_clone.c`.
+- **Moved:** sweep → `sweep/`, prompts → `prompts/`.
+- **Changed:** `--replica` required; `run.sh` zero-config entry point.
 
 ## v3 — sweep hardening
 
@@ -37,3 +44,4 @@ Fixed the `have()`-before-definition bug that poisoned every verdict, a
 ## v1 — sweep + prompt suite
 
 Initial Landlock-shaped conformance sweep and the twenty-prompt agentic suite.
+

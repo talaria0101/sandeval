@@ -84,6 +84,29 @@ sys.exit(0 if hits == 0 else 3)
 PY
 case $? in 0) ;; *) findings=$((findings+1));; esac
 
+# --- CPU speculative-execution status (V13/V14) ---------------------------- #
+say ""
+say "CPU speculative-execution status (host view):"
+if [ -r /proc/cmdline ]; then
+  case "$(cat /proc/cmdline 2>/dev/null)" in
+    *mitigations=off*) found "host kernel booted with mitigations=off" ;;
+    *) clear_ "no mitigations=off in /proc/cmdline" ;;
+  esac
+fi
+if [ -d /sys/devices/system/cpu/vulnerabilities ]; then
+  cpu_hits=0
+  for f in /sys/devices/system/cpu/vulnerabilities/*; do
+    [ -r "$f" ] || continue
+    v=$(cat "$f" 2>/dev/null)
+    case "$v" in
+      Vulnerable*) found "$(basename "$f"): $v"; cpu_hits=$((cpu_hits+1));;
+    esac
+  done
+  [ "$cpu_hits" -eq 0 ] && clear_ "no 'Vulnerable' entries in /sys/devices/system/cpu/vulnerabilities"
+else
+  clear_ "/sys/devices/system/cpu/vulnerabilities not present"
+fi
+
 # --- tmpfs markers (V3, prior PoCs) ---------------------------------------- #
 say ""
 say "tmpfs markers:"
