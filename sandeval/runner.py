@@ -379,6 +379,16 @@ def render_markdown(records: List[dict], ctx: Context, summary: Dict[str, int]) 
     return "\n".join(lines)
 
 
+def _exit_code(summary: Dict[str, int], args: argparse.Namespace) -> int:
+    """rc 1 when any record reaches the --fail-on threshold (default FAIL)."""
+    threshold = getattr(args, "fail_on", None) or "FAIL"
+    if summary.get("FAIL"):
+        return 1
+    if threshold == "SUSPECTED" and summary.get("SUSPECTED"):
+        return 1
+    return 0
+
+
 def write_reports(records: List[dict], ctx: Context, args: argparse.Namespace) -> None:
     summary = summarize(records)
     payload = {
@@ -419,6 +429,23 @@ def write_reports(records: List[dict], ctx: Context, args: argparse.Namespace) -
 
 def cmd_list(args: argparse.Namespace) -> int:
     vectors = discover_vectors(args.vectors_dir)
+    if getattr(args, "json", None):
+        payload = [
+            {
+                "id": v.id,
+                "title": v.title,
+                "severity": v.severity,
+                "maps_to": v.maps_to,
+                "host_verify": v.host_verify,
+                "host_global": bool(getattr(v, "host_global", False)),
+            }
+            for v in vectors
+        ]
+        with open(args.json, "w") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        print(f"{len(payload)} vectors -> {args.json}")
+        return 0
     print(f"{'id':>4}  {'severity':<13} {'maps':<18} title")
     for vector in vectors:
         print(f"{vector.id:>4}  {vector.severity:<13} {vector.maps_to:<18} {vector.title}")
@@ -480,7 +507,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not args.keep_scratch:
             shutil.rmtree(ctx.scratch, ignore_errors=True)
     summary = summarize(records)
-    return 1 if summary.get("FAIL") else 0
+    return _exit_code(summary, args)
 
 
 # --------------------------------------------------------------------------- #
@@ -496,13 +523,14 @@ def run_sweep(ctx: Context, safe: bool):
         argv.append("--safe")
     argv += [ctx.in_dir, ctx.out_dir]
     try:
+        timeout = float(os.environ.get("SANDEVAL_SWEEP_TIMEOUT", "600"))
         proc = subprocess.run(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             cwd=ctx.in_dir,
-            timeout=600,
+            timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         return 2, f"sweep failed: {exc}", []
@@ -551,7 +579,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
         with open(args.report, "a") as handle:
             handle.write("\n## Sweep summary\n\n```\n" + "\n".join(sweep_summary) + "\n```\n")
     print("\nnext: run host-verify on the host, then `sandeval diff old.json new.json`")
-    return 1 if summary.get("FAIL") else 0
+    return _exit_code(summary, args)
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
@@ -568,6 +596,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     order = list(newmap) + [i for i in oldmap if i not in newmap]
     regressions = 0
     movements = 0
+    changes = []
     print(f"{'id':>4}  {'old':<11} {'new':<11} verdict")
     for vector_id in order:
         before, after = oldmap.get(vector_id), newmap.get(vector_id)
@@ -588,7 +617,24 @@ def cmd_diff(args: argparse.Namespace) -> int:
             movements += 1
         if verdict:
             print(f"{vector_id:>4}  {before or '-':<11} {after or '-':<11} {verdict}")
+            changes.append({"id": vector_id, "old": before, "new": after, "verdict": verdict})
     print(f"\n{regressions} regression(s), {movements} other movement(s)")
+    if getattr(args, "json", None):
+        with open(args.json, "w") as handle:
+            json.dump(
+                {
+                    "old": args.old,
+                    "new": args.new,
+                    "regressions": regressions,
+                    "movements": movements,
+                    "changes": changes,
+                },
+                handle,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+        print(f"diff report: {args.json}")
     return 1 if regressions else 0
 
 
@@ -611,6 +657,8 @@ def _add_probe_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--host-file", action="append", help="readable out-of-policy file to target")
     p.add_argument("--seed", help="out-of-policy seed file for read/traversal vectors")
     p.add_argument("--canary", help="HOST:PORT canary for egress vectors")
+    p.add_argument("--fail-on", choices=("FAIL", "SUSPECTED"), default="FAIL",
+                   help="exit 1 when any vector reaches this status or worse (default: FAIL)")
     p.add_argument("--keep-scratch", action="store_true", help="do not remove the scratch dir")
 
 
@@ -644,9 +692,11 @@ def build_parser() -> argparse.ArgumentParser:
     diff = sub.add_parser("diff", help="compare two JSON reports for regressions")
     diff.add_argument("old", help="baseline report.json")
     diff.add_argument("new", help="current report.json")
+    diff.add_argument("--json", help="write a machine-readable diff here")
     diff.set_defaults(func=cmd_diff)
 
     lst = sub.add_parser("list", help="list vectors")
+    lst.add_argument("--json", help="write the catalogue as JSON here")
     lst.set_defaults(func=cmd_list)
 
     prompts = sub.add_parser("prompts", help="print the agentic prompt suite")

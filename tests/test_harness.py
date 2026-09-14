@@ -142,6 +142,71 @@ class AutomationTests(unittest.TestCase):
             self.assertIn("IMPROVED", out.stdout)
 
 
+class RunnerFeatureTests(unittest.TestCase):
+    """Exit-code threshold, machine-readable diff and catalogue."""
+
+    def test_exit_code_thresholds(self):
+        sys.path.insert(0, os.path.join(ROOT, "sandeval"))
+        import runner  # noqa: E402
+
+        fail_only = type("A", (), {"fail_on": "FAIL"})()
+        strict = type("A", (), {"fail_on": "SUSPECTED"})()
+        self.assertEqual(runner._exit_code({"FAIL": 1}, fail_only), 1)
+        self.assertEqual(runner._exit_code({"SUSPECTED": 1}, fail_only), 0)
+        self.assertEqual(runner._exit_code({"SUSPECTED": 1}, strict), 1)
+        self.assertEqual(runner._exit_code({"PASS": 2}, strict), 0)
+        self.assertEqual(runner._exit_code({}, fail_only), 0)
+
+    def test_diff_writes_machine_readable_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            old, new, out = (
+                os.path.join(td, "old.json"),
+                os.path.join(td, "new.json"),
+                os.path.join(td, "diff.json"),
+            )
+            with open(old, "w") as handle:
+                json.dump(
+                    {"results": [
+                        {"id": "V1", "result": {"status": "PASS", "evidence": ""}},
+                        {"id": "V9", "result": {"status": "FAIL", "evidence": ""}},
+                    ]},
+                    handle,
+                )
+            with open(new, "w") as handle:
+                json.dump(
+                    {"results": [
+                        {"id": "V1", "result": {"status": "FAIL", "evidence": ""}},
+                        {"id": "V9", "result": {"status": "PASS", "evidence": ""}},
+                        {"id": "V21", "result": {"status": "FAIL", "evidence": ""}},
+                    ]},
+                    handle,
+                )
+            out_proc = run("diff", old, new, "--json", out)
+            self.assertEqual(out_proc.returncode, 1, out_proc.stdout + out_proc.stderr)
+            with open(out) as handle:
+                data = json.load(handle)
+            self.assertEqual(data["regressions"], 1)  # V1 PASS->FAIL; NEW is not a regression
+            self.assertEqual(data["movements"], 1)  # V9 FAIL->PASS
+            verdicts = {c["id"]: c["verdict"] for c in data["changes"]}
+            self.assertEqual(verdicts["V1"], "REGRESSION")
+            self.assertEqual(verdicts["V9"], "IMPROVED")
+            self.assertEqual(verdicts["V21"], "NEW")
+
+    def test_list_writes_catalogue_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "catalogue.json")
+            out_proc = run("list", "--json", out)
+            self.assertEqual(out_proc.returncode, 0, out_proc.stderr)
+            with open(out) as handle:
+                data = json.load(handle)
+            self.assertEqual(len(data), len(EXPECTED_IDS))
+            ids = {entry["id"] for entry in data}
+            self.assertEqual(ids, set(EXPECTED_IDS))
+            for entry in data:
+                self.assertIn("host_global", entry)
+                self.assertIn(entry["severity"], SEVERITIES)
+
+
 class SafeGateTests(unittest.TestCase):
     """--safe must SKIP host-global vectors (V8 arms a host-side trap)."""
 
