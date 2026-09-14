@@ -1,6 +1,6 @@
 # Findings — bailey + errand red-team pass
 
-The state of each vector against the replica this harness was built on. A
+The state of each vector against the sandbox this harness was built on. A
 finding is listed here only once its effect was reproduced; the vectors are the
 reproduction. Remediation is a suggestion, not a claim that a patch exists.
 
@@ -55,7 +55,7 @@ daemon's memory.
 
 ## V5 — the orchestrator's stdio is writable (ship-blocker)
 
-**What.** `/proc/1/fd/0` and `/proc/1/fd/1` open `O_WRONLY`. On this replica
+**What.** `/proc/1/fd/0` and `/proc/1/fd/1` open `O_WRONLY`. On this sandbox
 PID 1 *is* the agent runtime driven by the daemon, so its stdin is the daemon's
 command stream and its stdout is the transcript.
 
@@ -178,7 +178,7 @@ the hardware's, and the hardware was told not to use it.
 and treat CPU pinning/partitioning or confidential computing as the only way to
 share an unmitigated core safely.
 
-## V15 — kernel hardening knobs (pass on this replica)
+## V15 — kernel hardening knobs (pass on this sandbox)
 
 `kptr_restrict`, `dmesg_restrict`, `randomize_va_space`, `/proc/kcore`,
 `/dev/kvm`, `core_pattern`, `modprobe` and lockdown were probed. The kernel did
@@ -200,7 +200,7 @@ compose into a memory-disclosure path.
 **Fix.** Mount a per-session `/proc` with `hidepid=2` and a PID namespace that
 contains only the session, so there is no peer process to map.
 
-## V17 — cgroup controls (pass on this replica)
+## V17 — cgroup controls (pass on this sandbox)
 
 The session cgroup's `cgroup.procs`, `memory.max`, `subtree_control` and any
 `release_agent` were probed for writability. All were read-only, so the agent
@@ -213,7 +213,7 @@ are not set, V17 shows the agent cannot set them either.
 **What.** The project directory is writable and survives into the next session
 on the same project, so anything planted there is a cross-session artifact
 (the P4/P16/P20 class). Shared caches (`CARGO_HOME`, `GOMODCACHE`,
-`XDG_CACHE_HOME`, pip cache) were not present in this replica; where they are,
+`XDG_CACHE_HOME`, pip cache) were not present in this sandbox; where they are,
 they are the same class of finding.
 
 **Fix.** A per-errand scratch directory (not the project root) for build
@@ -224,7 +224,7 @@ output, and integrity-checked shared caches.
 The symlink was flipped between an in-policy file and an out-of-policy target
 in a tight loop while another thread opened it. No open ever returned the
 out-of-policy content: Landlock resolves at operation time, so there is no
-check-then-use window. (On this replica the configured target was directly
+check-then-use window. (On this sandbox the configured target was directly
 readable anyway, which V12 reports; V19 reports `SKIP` rather than claiming a
 race win.)
 

@@ -41,7 +41,7 @@ at all. In every case the in-sandbox report is a lead; the host is the court.
   paths the report cannot see). `SUSPECTED` means "reachable, pending
   host-side confirmation", so it cannot be silently upgraded to success either.
 - **`host_global` probes are opt-in.** Anything that could affect the host
-  beyond the replica is marked and skipped under `--safe`.
+  beyond the sandbox is marked and skipped under `--safe`.
 
 ## Preconditions and discovery
 

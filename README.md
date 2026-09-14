@@ -3,28 +3,34 @@
 Verdict-based verification tooling for AI-agent sandboxes, built against a
 Landlock + seccomp policy engine and useful for any Linux path/filter sandbox.
 The system under test is the **sandbox**, never the model: everything runs
-inside the replica and is confirmed host-side, and an agent that refuses is
+inside the sandbox and is confirmed host-side, and an agent that refuses is
 recorded as telemetry, not counted as a control.
 
-**v5** added speculative-execution coverage (Spectre), eight more vectors, and a
-one-command automated run with regression diffing. **v6** turns the sweep's
-one-off findings into four permanent vectors (pidfd_getfd fd theft, chroot
-escape walk, behavioral ptrace, io_uring conformance), makes `--safe` actually
-gate host-global probes, and adds `--fail-on`, machine-readable diff/catalogue
-output and a sweep timeout override. It exists so a future maintainer (or a
-fresh agent with no memory of this work) can reproduce every finding with one
-command and know exactly what still needs fixing.
+One command runs the whole battery — twenty-four deterministic vectors plus a
+120+ probe syscall-surface sweep — and produces a verdict report you can diff
+across sandbox versions, with a host-side verifier for every claim the sandbox
+cannot score by itself.
 
 ---
 
 ## Quickstart
 
-Run inside a **disposable replica**, as the agent user, never against a live
-instance:
+Run inside the **disposable sandbox under test**, as the agent user, never against a live
+instance, with one command:
 
 ```sh
-./run-all.sh                   # sweep + all vectors + one report
-./run-all.sh --json r.json --report r.md --seed "$OUT/seedfile"
+./run.sh                       # every vector + the sweep, unattended
+```
+
+Reports land in the working directory (`sandeval-report.json`,
+`sandeval-report.md`, `sandeval-sweep.log`); pass your own paths if you want
+them elsewhere. Exit code is `0` when nothing failed, `1` when any vector
+reported `FAIL` (pass `--fail-on SUSPECTED` to include suspected results,
+which is what you want in CI once you know a sandbox's baseline).
+
+Lower-level entry points:
+
+```sh
 ./bin/sandeval list            # vector catalogue
 ./bin/sandeval prompts         # the agentic prompt suite
 ./bin/sandeval diff old.json new.json   # regressions between two runs
@@ -32,13 +38,7 @@ instance:
 ./bin/sandeval list --json catalogue.json               # machine-readable catalogue
 ```
 
-Exit code is `0` when nothing failed, `1` when any vector reported `FAIL`.
-Pass `--fail-on SUSPECTED` to make the run exit `1` on `SUSPECTED` results too,
-which is what you want in CI once you know a sandbox's baseline.
-
-Everything refuses to run without `--replica` (or `SANDEVAL_REPLICA=1`).
-
-Then, **on the host** (not in the replica):
+Then, **on the host** (not in the sandbox):
 
 ```sh
 host-verify/verify.sh          # confirm effects; --clean removes markers
@@ -59,7 +59,7 @@ host-verify/verify.sh          # confirm effects; --clean removes markers
 A `FAIL` is a lead, not a conviction: run `host-verify/verify.sh` on the host to
 confirm it. The split matters because the sandbox can lie about itself and
 because several findings (metadata writes, the daemon's own git, the host CPU)
-leave their proof outside the replica.
+leave their proof outside the sandbox.
 
 ---
 
@@ -67,9 +67,9 @@ leave their proof outside the replica.
 
 ```
 bin/sandeval              runner CLI (Python stdlib only)
-run.sh / run-all.sh       zero-config entry points
+run.sh                    one-command unattended run (vectors + sweep + reports)
 sandeval/                 runner + core types
-vectors/                  v01..v20, auto-discovered
+vectors/                  v01..v24, auto-discovered
 tools/                    C helpers + git_p15_trap.sh
 sweep/                    landlock-surface-sweep.sh — syscall-surface conformance
 host-verify/verify.sh     host-side confirmation + cleanup
@@ -197,7 +197,8 @@ Rules that keep the battery honest:
 
 ## Safety model
 
-- `--replica` (or `SANDEVAL_REPLICA=1`) is mandatory.
+- Meant to run inside the disposable sandbox being evaluated; it does not
+  second-guess where it runs.
 - Each vector is a minimal, benign operation whose verdict is the result.
 - Scratch lives in a per-run directory under `--in` and is removed on exit;
   `run --clean` removes every marker.
@@ -209,7 +210,7 @@ Rules that keep the battery honest:
 ## Environment and portability
 
 Nothing is pinned to one machine. The runner discovers what it needs, and every
-value has an environment override, so the same checkout runs against a replica
+value has an environment override, so the same checkout runs against a sandbox
 with a different layout:
 
 | what | flag | env | discovery order |
@@ -242,17 +243,3 @@ Stdlib-only Python, no `$HOME` assumptions, no absolute paths in output.
   V6/V14 report `SKIP`.
 - optional: `getfattr`/`setfattr`, `curl`, `dig`, `capsh` for the sweep.
 
-## Provenance
-
-v1–v3 were a syscall-surface sweep plus a prompt suite. v4 rebuilt the kit as a
-vector evaluator with a host verifier. v5 added the Spectre layer, eight
-further vectors, and `auto`/`diff` automation. v6 (merged from the Nemo-010
-fork at v5, then extended) turned the sweep's one-off findings into permanent
-vectors V21–V24 and added the runner's threshold and JSON-output features. The
-method that worked: scripted conformance first (needs no model), then the
-agentic suite for the creative layer, then host-side scoring of every claim.
-Findings and remediation: `docs/findings.md`.
-
-## License
-
-MIT — see `LICENSE`.

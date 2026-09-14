@@ -56,7 +56,7 @@ sandbox versions.
 |---|---|
 | 0 | no `FAIL` |
 | 1 | at least one `FAIL`, or one `SUSPECTED` under `--fail-on SUSPECTED` |
-| 2 | usage error / not a replica / no vectors selected |
+| 2 | usage error / no vectors selected |
 
 ## Companion documents
 
