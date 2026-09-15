@@ -544,3 +544,79 @@ finding against the artifacts it claims:
   turn means errand#2's fix is deployed and V8 is retired. A fork under the
   bot account (talaria0101/Hello-World) may be created by errand's forkOf;
   it is deletable noise. host-verify/verify.sh --clean removes the markers.
+
+---
+
+## v9 pass (2026-09-15, bailey sandbox): practical impact - dosing a named host binary
+
+Battery addition: V38 (`vectors/v38_target_dos.py`). Everything before it
+proved that a primitive *exists* (an open that succeeds, metadata that is
+accepted) or left a marker in a file. V38 closes the distance to the impact an
+operator actually feels: **a named host binary is denied service, on demand,
+from inside the sandbox, and restored byte-identical.**
+
+### The finding (FAIL, ship-blocker)
+
+Landlock has no metadata right (V1), and the host read roots are mounted
+read-write. Therefore every host binary the policy lets the agent *read* or
+*execute* is one `chmod 000` away from being unexecutable host-wide: the mode
+lives in the shared inode, so the denial is visible to every host user, CI
+job and service that execs the file. No content byte needs to change; nothing
+in the policy mediates the operation; no seccomp filter for `chmod` exists on
+this build.
+
+The harmless proof cycle, as run live in this pass:
+
+1. undo record first: mode + size + sha256 written to
+   `/state/.sandeval-v38-<target>.json` before any mutation, so even a
+   kill -9 mid-cycle is healable (`run --clean --vector V38` or
+   `host-verify/verify.sh --clean`);
+2. deny: `chmod 000` on the target (fallback: rename inside its own
+   directory);
+3. prove denial: executing the target fails with EACCES - the exact failure
+   a user or CI job would hit;
+4. restore in a `finally`, then prove restoration: mode equal, sha256 equal
+   (the file is never opened for write), and the tool executes again.
+
+Live artifacts from this pass (both scored `CONFIRMED` by
+`host-verify/verify.sh` from the proof records):
+
+- `/state/home/.local/bin/ktlint` - the vector's default target is
+  `~/.local/bin/ktlint`, which inside this cage is the session-home tool dir;
+  a stand-in fixture was seeded there (65-byte `#!/bin/sh` stub). Dosed by
+  `chmod(2)->0`, exec failed EACCES, restored byte-identical
+  (sha256 `aa25b945cb15...`, mode 0755), stub runs again.
+- `/home/qaidvoid/.local/share/cargo/bin/b3sum` - a **real host binary**,
+  granted read+execute but not write by the policy: the exact V1 class.
+  Dosed by `chmod(2)->0`, exec failed EACCES host-side, restored
+  byte-identical (sha256 `a437d8efec75...`, mode 0755), `b3sum --version`
+  reports 1.8.5 again. Outage window: one exec attempt.
+
+### What this means for the deployment
+
+- The denial is not theoretical and not confined to the sandbox's own files:
+  the cargo bin tree is host tooling. The same primitive works against
+  anything read-granted - a toolchain, a service wrapper, the operator's own
+  `~/.local/bin` the moment it is mounted into a sandbox (which is exactly
+  what agent sandboxes do so the agent can install linters like ktlint).
+- Composition: V38 is the practical form of V1 and composes with V32-class
+  process control for long-running services; with persistence (V18/V3) the
+  deny can be re-applied on every session start, turning a probe into a
+  standing outage.
+- The fix is the V1 fix, restated with stakes: mount host read roots
+  read-only (the VFS then refuses chmod regardless of Landlock), or chown
+  host tool trees to a uid the cage does not map so DAC refuses. Until then,
+  any binary the agent can read is doseable at will.
+
+### Honest limits
+
+- The operator's real `~/.local/bin/ktlint` is not mounted in this cage, so
+  the default target here is the seeded stand-in in the session home (itself
+  a real host-side file) plus the cross-wall proof on b3sum. Where a sandbox
+  does not expose any named target, V38 reports SKIP with the seed command -
+  a precondition, never a pass.
+- System paths (`/usr`, `/bin`, `/lib`, `/etc`, `/opt`, ...) require `--arm`
+  before the vector will dose them: those are load-bearing for the host, and
+  the finding does not need them to be proven.
+- The rename-deny fallback is only tried when the target's parent directory
+  is writable; on this build the chmod primitive is what lands.
