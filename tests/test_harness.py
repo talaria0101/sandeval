@@ -15,7 +15,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(ROOT, "bin", "sandeval")
-EXPECTED_IDS = [f"V{n}" for n in range(1, 31)]
+EXPECTED_IDS = [f"V{n}" for n in range(1, 32)]
 SEVERITIES = {"ship-blocker", "high", "medium", "low", "info"}
 
 
