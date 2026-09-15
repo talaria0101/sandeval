@@ -22,6 +22,7 @@ except ImportError:
 PTRACE_TRACEME = 0
 PTRACE_PEEKDATA = 2
 PTRACE_POKEDATA = 3
+PTRACE_CONT = 7
 WORD = 8  # bytes per PEEKDATA word on 64-bit platforms
 MARKER = (b"SANDEVAL_V23" + b"\x00" * WORD)[:WORD]
 TRACEME_DENIED = 3  # child exit code: PTRACE_TRACEME failed

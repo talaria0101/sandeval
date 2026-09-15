@@ -37,8 +37,8 @@ except ImportError:
 NUMBERS = {
     "x86_64": {"perf_event_open": 298, "userfaultfd": 323, "bpf": 321,
                "add_key": 248, "request_key": 249, "keyctl": 250},
-    "aarch64": {"perf_event_open": 241, "userfaultfd": 282, "bpf": 386,
-                "add_key": 279, "request_key": 280, "keyctl": 270},
+    "aarch64": {"perf_event_open": 241, "userfaultfd": 282, "bpf": 280,
+                "add_key": 217, "request_key": 218, "keyctl": 219},
 }
 KEYCTL_READ = 11
 
@@ -124,12 +124,14 @@ class SidechannelSurfaceVector(Vector):
         attr[40:48] = (1 | (1 << 5)).to_bytes(8, "little")  # disabled | exclude_kernel
 
         def open_one(pid):
+            # perf_event_open(attr, pid, cpu, group_fd, flags)
             fd, err = raw_syscall(
                 nums["perf_event_open"],
                 ctypes.cast(attr, ctypes.c_void_p),
-                len(attr),
                 pid,
-                0,  # cpu = -1 would be all cpus; 0 pins to cpu 0, valid for self
+                -1,  # cpu = -1: all cpus (0 would pin to cpu 0 and skew self vs pid1)
+                -1,  # no group
+                0,
             )
             if fd < 0:
                 return errno_name(OSError(err, "perf_event_open"))
