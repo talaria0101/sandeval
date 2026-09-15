@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-__version__ = "7.3.0"
+__version__ = "7.4.0"
 
 
 class Status(str, Enum):
@@ -98,6 +98,9 @@ class Context:
     verbose: bool = False
     canary: Optional[str] = None
     seed: Optional[str] = None
+    #: named host binary for the target-DoS vectors (V38); ``--target`` /
+    #: ``$SANDEVAL_TARGET``, defaulting to ``~/.local/bin/ktlint``.
+    target: Optional[str] = None
     host_files: List[str] = field(default_factory=list)
     workspace: str = "/workspace"
     state_dir: str = "/state"
@@ -138,6 +141,9 @@ class Context:
 
     def policy_write_roots(self) -> List[str]:
         return _grants(self._policy_text(), "write")
+
+    def policy_execute_roots(self) -> List[str]:
+        return _grants(self._policy_text(), "execute")
 
     def _policy_text(self) -> str:
         if self.policy_file and os.path.exists(self.policy_file):

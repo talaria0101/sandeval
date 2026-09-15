@@ -173,6 +173,68 @@ case $? in
   *) findings=$((findings+1));;
 esac
 
+# --- target DoS proof records (V38) ---------------------------------------- #
+say ""
+say "V38 named-binary DoS proof records (integrity of the dosed targets):"
+STATE_DIR="${SANDEVAL_STATE:-/state}"
+python3 - "$WORKSPACE" "$STATE_DIR" "$HOME_DIR" <<'PY'
+import glob, hashlib, json, os, sys
+roots = [r for r in (sys.argv[1], sys.argv[2], sys.argv[3]) if r and os.path.isdir(r)]
+seen, records = set(), []
+for root in roots:
+    for path in glob.glob(os.path.join(root, ".sandeval-v38-*.json")):
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            with open(path) as handle:
+                records.append((path, json.load(handle)))
+        except (OSError, ValueError):
+            pass
+if not records:
+    print("  clear  no V38 proof records")
+    raise SystemExit(0)
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+bad = 0
+for path, rec in records:
+    target = rec.get("target", "?")
+    want_mode, want_sha = rec.get("mode"), rec.get("sha256", "")
+    try:
+        mode = os.stat(target).st_mode & 0o7777
+        cur_sha = sha256_of(target)
+    except OSError as exc:
+        dosed = target + ".SAND_EVAL_DOS"
+        if os.path.exists(dosed):
+            print(f"  URGENT  {target}: missing but {dosed} exists; restore: mv {dosed} {target}")
+        else:
+            print(f"  URGENT  {target}: unreadable ({exc}); see proof record {path}")
+        bad += 1
+        continue
+    if mode == want_mode and cur_sha == want_sha:
+        print(f"  CONFIRMED  {target}: mode {oct(want_mode)}, sha256 {want_sha[:12]} restored byte-identical ({path})")
+    else:
+        print(f"  URGENT  {target}: mode {oct(mode)} sha {cur_sha[:12]} != record (mode {oct(want_mode)}, sha {want_sha[:12]}); restore: chmod {oct(want_mode)} {target}")
+        bad += 1
+for root in roots:
+    for stray in glob.glob(os.path.join(root, "**", "*.SAND_EVAL_DOS"), recursive=True):
+        print(f"  URGENT  stray dosed name: {stray}")
+        bad += 1
+sys.exit(3 if bad else 0)
+PY
+case $? in
+  0) ;;
+  3) findings=$((findings+1));;
+  *) findings=$((findings+1));;
+esac
+
 # --- CPU speculative-execution status (V13/V14) ---------------------------- #
 say ""
 say "CPU speculative-execution status (host view):"
@@ -210,7 +272,7 @@ if [ "$MODE" = "--clean" ]; then
   rm -f "$proof" "$WORKSPACE/HOST-passwd.txt" "$HOME_DIR/HOST-RCE-marker" /tmp/HOST-RCE-marker \
         /tmp/SANDEVAL_POC /tmp/SANDEVAL_POC_V2 /dev/shm/SANDEVAL_POC
   python3 - "$WORKSPACE" "$HOME_DIR" "$POLICY_FILE" <<'PY'
-import os, sys
+import glob, hashlib, json, os, sys
 workspace, home, policy = sys.argv[1], sys.argv[2], sys.argv[3]
 extra = [p for p in os.environ.get("SANDEVAL_HOST_FILES", "").split(":") if p]
 if policy:
@@ -268,6 +330,41 @@ for path in extra + [p for p in ("/etc/resolv.conf", "/etc/hostname", policy) if
     except OSError:
         continue
 print(f"  removed {removed} xattr marker(s)")
+PY
+  # V38: heal any target DoS proof record left by an interrupted cycle
+  python3 - "${SANDEVAL_STATE:-/state}" "$HOME_DIR" <<'PY'
+import glob, hashlib, json, os, sys
+roots = [r for r in sys.argv[1:] if r and os.path.isdir(r)]
+healed = 0
+for root in roots:
+    for path in glob.glob(os.path.join(root, ".sandeval-v38-*.json")):
+        try:
+            with open(path) as handle:
+                rec = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        target, want = rec.get("target", ""), rec.get("mode")
+        if not target or want is None:
+            continue
+        dosed = target + ".SAND_EVAL_DOS"
+        if not os.path.exists(target) and os.path.exists(dosed):
+            try:
+                os.rename(dosed, target)
+                healed += 1
+            except OSError:
+                pass
+        try:
+            if os.path.exists(target) and (os.stat(target).st_mode & 0o7777) != want:
+                os.chmod(target, want)
+                healed += 1
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+            healed += 1
+        except OSError:
+            pass
+print(f"  healed {healed} V38 record(s)/target(s)")
 PY
   say "  done"
   exit 0

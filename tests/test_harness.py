@@ -15,7 +15,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(ROOT, "bin", "sandeval")
-EXPECTED_IDS = [f"V{n}" for n in range(1, 38)]
+EXPECTED_IDS = [f"V{n}" for n in range(1, 39)]
 SEVERITIES = {"ship-blocker", "high", "medium", "low", "info"}
 
 
@@ -304,7 +304,7 @@ class ImpactLayerTests(unittest.TestCase):
         from runner import discover_vectors  # noqa: E402
 
         vectors = {v.id: v for v in discover_vectors(os.path.join(ROOT, "vectors"))}
-        for vid in ("V29", "V30", "V31", "V32", "V33", "V34", "V35", "V36", "V37"):
+        for vid in ("V29", "V30", "V31", "V32", "V33", "V34", "V35", "V36", "V37", "V38"):
             self.assertIn(vid, vectors, vid)
             self.assertTrue(advice.for_id(vid)["why"], f"advice why missing for {vid}")
             self.assertTrue(advice.for_id(vid)["fix"], f"advice fix missing for {vid}")
@@ -332,6 +332,83 @@ class ImpactLayerTests(unittest.TestCase):
             self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
             residue = [n for n in os.listdir(td) if n.startswith("ingest-")]
             self.assertEqual(residue, [])
+
+
+class TargetDosTests(unittest.TestCase):
+    """V38: the harmless deny-restore cycle against a named host binary."""
+
+    @staticmethod
+    def _fixture(td, name="ktlint", mode=0o755):
+        path = os.path.join(td, name)
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\necho 'ktlint stand-in (sandeval V38 fixture): $*'\n")
+        os.chmod(path, mode)
+        return path
+
+    def test_doses_and_restores(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = self._fixture(td)
+            before = os.stat(fixture).st_mode & 0o7777
+            json_path = os.path.join(td, "r.json")
+            env = dict(os.environ, SANDEVAL_TARGET=fixture)
+            out = run(
+                "run", "--vector", "V38", "--in", td, "--out", td,
+                "--state-dir", td, "--json", json_path, env=env,
+            )
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            with open(json_path) as handle:
+                data = json.load(handle)
+            record = next(r for r in data["results"] if r["id"] == "V38")
+            self.assertEqual(record["result"]["status"], "FAIL", record)
+            detail = record["result"]["detail"]
+            self.assertEqual(detail["mode_after"], detail["mode_before"])
+            self.assertTrue(os.access(fixture, os.X_OK))
+            self.assertEqual(os.stat(fixture).st_mode & 0o7777, before)
+            # the proof record stays behind for host-side scoring
+            self.assertTrue(detail.get("record"))
+
+    def test_missing_target_skips(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = dict(os.environ, SANDEVAL_TARGET=os.path.join(td, "absent"))
+            out = run("run", "--vector", "V38", "--in", td, "--out", td, env=env)
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            self.assertIn("SKIP", out.stdout)
+            self.assertIn("--target", out.stdout)  # the skip says what to supply
+
+    def test_system_path_needs_arm(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = dict(os.environ, SANDEVAL_TARGET="/bin/sh")
+            out = run("run", "--vector", "V38", "--in", td, "--out", td, env=env)
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            self.assertIn("SKIP", out.stdout)
+            self.assertIn("--arm", out.stdout)
+
+    def test_cleanup_heals_a_crashed_cycle(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = self._fixture(td)
+            record = os.path.join(td, ".sandeval-v38-ktlint.json")
+            with open(record, "w") as handle:
+                json.dump({"vector": "V38", "target": fixture, "mode": 0o755,
+                           "size": 1, "sha256": "x", "ts": "t"}, handle)
+            os.chmod(fixture, 0)  # simulate a kill -9 mid-cycle
+            out = run(
+                "run", "--clean", "--vector", "V38",
+                "--in", td, "--out", td, "--state-dir", td,
+            )
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            self.assertEqual(os.stat(fixture).st_mode & 0o7777, 0o755)
+            self.assertFalse(os.path.exists(record))
+
+    def test_v38_is_host_global_and_safe_skips_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = self._fixture(td)
+            env = dict(os.environ, SANDEVAL_TARGET=fixture)
+            out = run(
+                "run", "--safe", "--vector", "V38", "--in", td, "--out", td, env=env,
+            )
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            self.assertIn("SKIP", out.stdout)
+            self.assertIn("host-global", out.stdout)
 
 
 class SafeGateTests(unittest.TestCase):

@@ -256,6 +256,7 @@ def build_context(args: argparse.Namespace) -> Context:
         verbose=args.verbose,
         canary=args.canary or os.environ.get("SANDEVAL_CANARY") or os.environ.get("LANDSCAN_CANARY"),
         seed=args.seed or os.environ.get("SANDEVAL_SEED"),
+        target=args.target or os.environ.get("SANDEVAL_TARGET") or None,
         host_files=[],
         workspace=workspace,
         state_dir=state_dir,
@@ -479,6 +480,7 @@ def write_reports(records: List[dict], ctx: Context, args: argparse.Namespace) -
             "policy_file": ctx.policy_file,
             "seed": ctx.seed,
             "canary": ctx.canary,
+            "target": ctx.target,
             "safe": ctx.safe,
             "arm": ctx.arm,
             "host_files": ctx.host_files,
@@ -755,6 +757,8 @@ def _add_probe_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--host-file", action="append", help="readable out-of-policy file to target")
     p.add_argument("--seed", help="out-of-policy seed file for read/traversal vectors")
     p.add_argument("--canary", help="HOST:PORT canary for egress vectors")
+    p.add_argument("--target", help="named host binary for target-DoS vectors (V38); "
+                                    "default: $SANDEVAL_TARGET or ~/.local/bin/ktlint")
     p.add_argument("--fail-on", choices=("FAIL", "SUSPECTED"), default="FAIL",
                    help="exit 1 when any vector reaches this status or worse (default: FAIL)")
     p.add_argument("--compare", metavar="OLD.json",

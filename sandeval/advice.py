@@ -157,6 +157,10 @@ ADVICE = {
         "why": "A pipe core_pattern runs a host-root handler on every crash of any process; the daemon is crashable from inside when V32 holds. The chain turns a DoS primitive into host-root code execution with the daemon's memory as input.",
         "fix": "Point kernel.core_pattern at a file path (not a pipe) on shared hosts, or ensure the daemon is not signallable from the agent uid (V32's fix); keep RLIMIT_CORE at 0 inside the sandbox.",
     },
+    "V38": {
+        "why": "The V1 metadata gap is not just tamper evidence: one chmod makes any named host binary the agent can read non-executable, so every user, CI job or service that execs it is denied until someone notices. Tool directories the sandbox mounts for the agent (like ~/.local/bin) are the natural target: dosing the agent's own linter or build tool is one syscall, and the outage is real while the repair is not obvious.",
+        "fix": "Mount host read roots read-only so the VFS refuses chmod, or chown host tool trees to a uid the sandbox does not map so DAC refuses it. To restore a dosed binary: the vector's .sandeval-v38-*.json proof record holds the original mode - `./bin/sandeval run --clean --vector V38` (or host-verify/verify.sh --clean) heals from it; by hand, chmod the recorded mode back.",
+    },
 }
 
 DEFAULT = {
