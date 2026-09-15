@@ -46,8 +46,8 @@ ADVICE = {
         "fix": "None needed while it passes; re-run after every kernel or filter change.",
     },
     "V10": {
-        "why": "Without memory and pid ceilings a runaway or malicious agent can OOM the host or exhaust pids for everything else on it.",
-        "fix": "Set cgroup v2 memory.max and pids.max for the sandbox subtree; add RLIMIT_NPROC/RLIMIT_AS as an in-process backstop.",
+        "why": "Without memory and pid ceilings a runaway or malicious agent can OOM the host or exhaust pids for everything else on it; unbounded RLIMIT_MEMLOCK lets it pin host memory, and the free-space figure says how much disk one turn can fill.",
+        "fix": "Set cgroup v2 memory.max and pids.max for the sandbox subtree; add RLIMIT_NPROC/RLIMIT_AS/RLIMIT_MEMLOCK as in-process backstops; give the writable path a size quota (sized filesystem or loopback image).",
     },
     "V11": {
         "why": "inotify watches on out-of-policy trees leak file names and activity timing to the agent.",
@@ -120,6 +120,42 @@ ADVICE = {
     "V28": {
         "why": "SysV IPC has no namespace by default, so on a shared kernel the agent can attach same-uid (or, as root, any) host segments and read live process memory through an interface no path policy mediates.",
         "fix": "Create the sandbox in a new IPC namespace (clone(CLONE_NEWIPC)/unshare -i) or seccomp-deny shmget/shmat; prefer POSIX shm under a policy-controlled directory.",
+    },
+    "V29": {
+        "why": "A duplicated foreign write descriptor is a content write to a host file the policy never granted: the daemon's own logs and the transcript the operator reads. Markers left as SAND_EVAL_POC lines are confirmable with host-verify/verify.sh.",
+        "fix": "Run the agent in its own PID namespace, or drop the daemon's privileges so its fds are not ptrace-reachable from the agent uid; seccomp-deny pidfd_open/pidfd_getfd as a belt-and-braces.",
+    },
+    "V30": {
+        "why": "link(2) governs the destination directory, so a hardlink re-roots a foreign inode inside the write-granted tree: reads and appends through the new name are workspace operations on a host file. One EPERM (fs.protected_hardlinks) is the only thing stopping this on most hosts.",
+        "fix": "Keep fs.protected_hardlinks=1 host-wide; put the workspace on its own filesystem so cross-boundary links fail with EXDEV structurally; keep read-granted host trees on a different filesystem than the workspace.",
+    },
+    "V31": {
+        "why": "open_tree/move_mount are the new mount API: they need only CAP_SYS_ADMIN over the owning user namespace, and where clone(CLONE_NEWUSER) succeeds they re-root a foreign file inside the workspace so Landlock grants what it refused at the original path.",
+        "fix": "Seccomp-deny clone/clone3 with CLONE_NEW* flags (the V6 fix - it removes the capability source), and deny open_tree/move_mount/fsopen/fsmount/fspick/mount_setattr by number so the new API cannot be reached even from a privileged namespace.",
+    },
+    "V32": {
+        "why": "Same-uid process control is outside every path policy: SIGSTOP, nice and OOM-tuning against the orchestrator are one syscall each, and with a pipe core_pattern the crash chains to host-root code (V37).",
+        "fix": "Run the daemon under a different uid than the agent (or in its own PID namespace); seccomp-deny kill/tgkill/pidfd_send_signal and setpriority toward other processes if the uid split is impossible.",
+    },
+    "V33": {
+        "why": "Reading the daemon's memory is the credential breach V4 can only infer: heap and stack hold live tokens. /proc/<pid>/mem is the classic route a modern-syscall denylist misses even when process_vm_readv is filtered.",
+        "fix": "Set the daemon non-dumpable (PR_SET_DUMPABLE(0)) or run it as another uid; keep yama ptrace_scope >= 1; seccomp-deny process_vm_readv/writev AND consider filtering open of /proc/<pid>/mem via a supervisor, since seccomp cannot inspect the path.",
+    },
+    "V34": {
+        "why": "AF_UNIX connects are not mediated by Landlock (ABI 1-3 have no socket right at all): docker/containerd sockets are a container escape, ssh/gpg agent sockets are signing oracles for host keys, and a writable parent directory lets the next run replace the socket entirely.",
+        "fix": "Move runtime and agent sockets out of directories the sandbox can see or write; run container runtimes on a root-owned socket (never the agent uid); keep agent sockets in per-session directories with 0700.",
+    },
+    "V35": {
+        "why": "The file that draws the sandbox boundary lives inside the boundary: a write-open on policy.toml means the next session's read/write lists, egress and limits are chosen by whatever wrote last. Cross-session control swap with no exploit needed.",
+        "fix": "Serve the policy to the sandbox from outside the write-granted set (a bind-mounted ro file, a root-owned location, or an in-memory config); never store the effective policy in the agent's state dir.",
+    },
+    "V36": {
+        "why": "perf_event_open at paranoid<=0 measures other processes: a timing side channel aimed at the orchestrator, and the missing ingredient for a practical exploit against an unmitigated CPU (V13/V14). Keyring, userfaultfd and bpf are the other standard escalation doors.",
+        "fix": "Keep kernel.perf_event_paranoid >= 2, vm.unprivileged_userfaultfd = 0; deny perf_event_open, bpf, add_key/keyctl and userfaultfd in the filter (they are never needed by build tooling).",
+    },
+    "V37": {
+        "why": "A pipe core_pattern runs a host-root handler on every crash of any process; the daemon is crashable from inside when V32 holds. The chain turns a DoS primitive into host-root code execution with the daemon's memory as input.",
+        "fix": "Point kernel.core_pattern at a file path (not a pipe) on shared hosts, or ensure the daemon is not signallable from the agent uid (V32's fix); keep RLIMIT_CORE at 0 inside the sandbox.",
     },
 }
 

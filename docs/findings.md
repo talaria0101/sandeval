@@ -346,3 +346,126 @@ the vectors' own `--clean` (14 markers across files), re-verified clear.
 Scratch: `auto`-mode was found leaking its `.sandeval-*` scratch directory
 (cmd_run cleaned up, cmd_auto never did); fixed with a finally + regression
 test, full battery re-run leaves zero residue.
+
+---
+
+## v8 pass (2026-09-15, bailey sandbox): the impact layer
+
+Battery: FAIL=14, PASS=11, SKIP=6, SUSPECTED=5, INFO=1 plus a 140-probe
+sweep. This pass exists because the earlier findings proved *reachability*
+(an open that succeeds, a descriptor that dups) and stopped there. The new
+vectors V29-V37 take each primitive to its conclusion and leave a literal
+`SAND_EVAL_POC` marker in whatever host file the write lands in;
+`host-verify/verify.sh` scores the markers from outside.
+
+### V29 — foreign-fd content write (FAIL, ship-blocker)
+
+V21 proved pidfd_getfd and stopped at fstat; V5 proved /proc/1/fd/N
+write-open and stopped at the open. V29 finishes the thought: it reads the
+daemon's fd table (fdinfo gives the open flags before anything is
+duplicated), dups descriptors that carry O_APPEND, and appends a one-line
+`SAND_EVAL_POC V29` marker. Live result: the daemon's own session log on the
+host now contains the marker line (confirmed by verify.sh), and pid 1's
+stdout got the marker too - the transcript the operator reads. Descriptors
+in write mode WITHOUT O_APPEND are reported as a capability and deliberately
+left unwritten: writes through them would land at the victim's shared offset
+and corrupt its stream. The asymmetry the filter shows (process_vm_readv
+denied, /proc fd duplication allowed) is the finding: modern syscalls were
+named, the classic dup route was not.
+
+### V33 — cross-process memory read (FAIL, ship-blocker)
+
+The logical conclusion of V4/V16: environ and maps are previews, the memory
+itself is the prize. A canary child proves the method works (fork a child
+that publishes a buffer address, recover the 32 known bytes), then the same
+two primitives point at pid 1's [stack] top where the environment lives.
+Live result: `pread` on `/proc/1/mem` returns the daemon's stack bytes.
+`process_vm_readv` (310) is EPERM - the denylist names it - but nobody
+filtered the classic procfs file route, and seccomp cannot inspect paths.
+With V13/V14 (unmitigated CPU, live Spectre repro) and V16 (peer maps as the
+target map) this is a complete cross-process disclosure chain. Evidence
+carries byte counts and key NAMES only, never values.
+
+### V35 — the sandbox's own policy file is writable (FAIL, ship-blocker)
+
+The policy that draws the boundary (`/state/policy.toml`) lives inside the
+write-granted state dir. V35 opens it O_WRONLY and closes it - no byte
+written, no truncate - and sets an xattr marker the host verifier removes.
+Live result: write-open succeeds, plus four more state control files are
+write-openable. Whoever runs this code chooses the next session's read/write
+lists, egress and limits: a cross-session control swap that needs no
+exploit at all. The fix is placement, not filtering: serve the policy from
+outside the write-granted set.
+
+### V32 — orchestrator process control (FAIL, high)
+
+Same-uid process control is invisible to any path policy. Sig-0 probes only:
+`kill(pid 1, 0)` ok, `setpriority(pid 1, current)` ok, pidfd_send_signal
+EPERM (the filter names 424), oom_score_adj EACCES. The daemon can be
+SIGSTOPped, parked at nice 19, and (with V37) crashed into a pipe
+core_pattern if one existed. No signal was ever delivered; every probe is
+permission-only or value-preserving.
+
+### V31 — new mount API ingest (PASS here, ship-blocker elsewhere)
+
+`clone(CLONE_NEWUSER|CLONE_NEWNS)` is denied on this build while bare
+CLONE_NEWUSER still succeeds (V6 FAIL) - so bailey's clone filter now
+flag-matches NEWNS but not NEWUSER, and open_tree(428)/move_mount(429)/
+fsopen(430)/mount_setattr(442) are all EPERM. The route is closed here, and
+the vector PASSes with that step-level attribution. On any sandbox without
+those two fixes the helper does the documented parent-writes-the-uid-map
+handshake and re-roots a foreign file inside the workspace, where Landlock
+then grants what it refused at the original path. All mounts live in the
+child's own mount namespace; nothing survives the probe.
+
+### V30 — hardlink ingest (SKIP on this topology, structural)
+
+`link(2)` checks the destination directory, not the source inode, so a
+hardlink re-roots a foreign inode inside the write-granted tree: read and
+append through the new name are workspace operations on a host file. Here
+every candidate (daemon-opened files, the policy read list, /etc) sits on a
+different filesystem than the workspace - 12/12 EXDEV - so the boundary is
+structurally closed by the bind-mount layout, which is a stronger guard than
+fs.protected_hardlinks and worth knowing on purpose. The vector reports SKIP
+rather than a hollow PASS. Where workspace and read-roots share a filesystem
+(the common non-overlay layout), this is a content write to host files.
+
+### V34/V36/V37 — surfaces measured (SKIP/INFO/PASS)
+
+V34: /proc/net/unix exposes no path sockets and no socket-shaped env vars in
+this cage, so the docker/agent-socket reach is untested here; the vector
+exists for every sandbox that shows the table. V36: perf_event_open, add_key,
+userfaultfd, bpf all EPERM (hardened; the cross-process perf FAIL path is
+wired for weaker builds). V37: RLIMIT_CORE is 0 and the pattern writes
+files, so the core chain is closed; with a pipe pattern plus V32's kill
+reach it composes to host-root exec, reported SUSPECTED with the handler
+named, never armed.
+
+### Sweep section 3c — the denylist, number by number
+
+New sweep section probes the modern surface directly: pidfd_send_signal
+ALLOW, pidfd_getfd ALLOW, kcmp ALLOW, mlockall ALLOW (pairs with V10's
+missing RLIMIT_MEMLOCK: the agent can pin host memory), while open_tree,
+fsopen, mount_setattr, process_vm_readv, perf_event_open, add_key,
+userfaultfd, bpf, clock_settime, acct and vhangup are all denied. That is
+the exact remediation surface for V21/V32/V33: deny 424/438 and the
+mlockall/kcmp pair, and the classic-file routes (/proc/N/fd/N,
+/proc/N/mem) still need the uid/namespace split, because seccomp cannot
+inspect paths.
+
+### What was not found (v8 revision)
+
+- **No new mount API gap on this build**: open_tree/move_mount/fsopen/
+  mount_setattr all EPERM even for a userns-root child, so Landlock's lack
+  of hooks there is currently unreachable. The V6 half-gap (bare
+  CLONE_NEWUSER with full caps) remains the standing finding.
+- **No hardlink write across mounts**: EXDEV everywhere; the topology does
+  the work fs.protected_hardlinks would otherwise do.
+- **No io_uring escape**: io_uring_setup is allowed (sweep ks-io_uring) but
+  V24 confirms openat through it honours Landlock; nothing new this pass.
+- **No SysV shm targets** (V28 SKIP): the boundary remains untested rather
+  than passed.
+- **Content writes outside the policy still require a stolen descriptor**
+  (V29) or a shared-filesystem hardlink (V30): direct open of out-of-policy
+  paths is refused at every route tried (V12, V19, openat2, io_uring), and
+  the daemon's append-mode fds are the one open door, as V29 demonstrates.
