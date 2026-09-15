@@ -112,7 +112,7 @@ SCRATCH="$IN/.landscan"                          # fresh per run; removed by tra
 SAN="$SCRATCH/sanity"                            # creation-class probes live here (idempotent)
 HELPER="$SCRATCH/helper"
 PATH="$PATH:/sbin:/usr/sbin"                     # btrfs/mkswap/swapoff often live here
-have timeout || timeout(){ local t=$1; shift; "$@"; }   # degrade gracefully w/o coreutils-timeout
+have timeout || timeout(){ shift; "$@"; }   # degrade gracefully w/o coreutils-timeout (duration ignored)
 OUT_WAS_MNT=0; mountpoint -q "$OUT" 2>/dev/null && OUT_WAS_MNT=1  # never unmount pre-existing mounts
 SEED="$OUT/seedfile"                             # operator-seeded out-of-policy file (see README)
 # REVIEW NOTE: run this script AS THE AGENT USER, never root — root makes every
@@ -906,9 +906,9 @@ sec "10. Resource limits (config: memory=4g cpus=2 pids=512)"
 for f in memory.max memory.current pids.max cpu.max io.max io.stat; do
   [ -r "/sys/fs/cgroup/$f" ] && printf '  cgroup %-16s %s\n' "$f" "$(head -c 80 /sys/fs/cgroup/$f | tr '\n' ' ')"
 done
-for f in /sys/fs/cgroup/pids/pids.max; do   # cgroup v1
-  [ -r "$f" ] && printf '  cgroup %-16s %s\n' "pids/pids.max" "$(head -c 80 "$f" | tr '\n' ' ')"
-done
+if [ -r /sys/fs/cgroup/pids/pids.max ]; then   # cgroup v1
+  printf '  cgroup %-16s %s\n' "pids/pids.max" "$(head -c 80 /sys/fs/cgroup/pids/pids.max | tr '\n' ' ')"
+fi
 hcheck rsrc-memhog     deny memhog "${LANDSCAN_MEMHOG_MB:-$(mem_target_mb)}"
 PIDS_MAX=${LANDSCAN_PIDS_PROBE:-}
 if [ -z "$PIDS_MAX" ]; then
@@ -989,4 +989,4 @@ if [ "$ADOPT" = 1 ]; then
   echo "expect table adopted: $STATE/expect.tsv (future runs treat these verdicts as expected)"
 fi
 echo "SWEEP COMPLETE"
-exit $([ $UNEX -eq 0 ] && echo 0 || echo 1)
+if [ "$UNEX" -eq 0 ]; then exit 0; else exit 1; fi
