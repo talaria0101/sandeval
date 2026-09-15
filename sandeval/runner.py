@@ -482,7 +482,7 @@ def write_reports(records: List[dict], ctx: Context, args: argparse.Namespace) -
             "safe": ctx.safe,
             "arm": ctx.arm,
             "host_files": ctx.host_files,
-            "runtime_s": round(time.monotonic() - ctx.started, 1) if ctx.started else 0.0,
+            "runtime_s": round(time.monotonic() - ctx.started, 3) if ctx.started else 0.0,
         },
         "summary": summary,
         "results": records,
