@@ -3,18 +3,17 @@
     "arm": false,
     "canary": null,
     "host_files": [
-      "/etc/resolv.conf",
-      "/etc/hostname",
-      "/home/agent/example-file"
+      "<host-file>",
+      "<host-file>"
     ],
-    "in_dir": "/workspace",
-    "out_dir": "/opt",
-    "policy_file": "/state/policy.toml",
-    "runtime_s": 10.8,
+    "in_dir": "<scratch>",
+    "out_dir": "<scratch>",
+    "policy_file": "<state>",
+    "runtime_s": 6.8,
     "safe": false,
     "seed": null
   },
-  "generated": "2026-09-14T00:00:00+00:00",
+  "generated": "2026-09-15T00:00:00+00:00",
   "results": [
     {
       "duration_ms": 0,
@@ -63,7 +62,174 @@
       "title": "CPU speculative-execution mitigations (Spectre/Meltdown)"
     },
     {
+      "duration_ms": 0,
+      "host_verify": "verify.sh (greps SAND_EVAL_POC in the named host files)",
+      "id": "V29",
+      "maps_to": "P2 / P12 / V5 / V21",
+      "remediation": {
+        "fix": "Run the agent in its own PID namespace, or drop the daemon's privileges so its fds are not ptrace-reachable from the agent uid; seccomp-deny pidfd_open/pidfd_getfd as a belt-and-braces.",
+        "why": "A duplicated foreign write descriptor is a content write to a host file the policy never granted: the daemon's own logs and the transcript the operator reads. Markers left as SAND_EVAL_POC lines are confirmable with host-verify/verify.sh."
+      },
+      "result": {
+        "detail": {
+          "candidates": 0,
+          "capable_unwritten": [],
+          "dup_denied": {},
+          "eligible": 0,
+          "in_policy_dups": [],
+          "landed": [],
+          "marker": "SAND_EVAL_POC"
+        },
+        "evidence": "orchestrator transcript injection: SAND_EVAL_POC written to pid 1 fd 1 (no out-of-policy regular file was open for append this run)",
+        "status": "FAIL"
+      },
+      "severity": "ship-blocker",
+      "title": "foreign-fd content write (pidfd_getfd into daemon-held files)"
+    },
+    {
       "duration_ms": 2,
+      "host_verify": "verify.sh (greps SAND_EVAL_POC in the named host files)",
+      "id": "V30",
+      "maps_to": "P2 / V12",
+      "remediation": {
+        "fix": "Keep fs.protected_hardlinks=1 host-wide; put the workspace on its own filesystem so cross-boundary links fail with EXDEV structurally; keep read-granted host trees on a different filesystem than the workspace.",
+        "why": "link(2) governs the destination directory, so a hardlink re-roots a foreign inode inside the write-granted tree: reads and appends through the new name are workspace operations on a host file. One EPERM (fs.protected_hardlinks) is the only thing stopping this on most hosts."
+      },
+      "result": {
+        "detail": {
+          "crossfs": 12,
+          "linked": [],
+          "marker": "SAND_EVAL_POC",
+          "readable": 0,
+          "refused": {
+            "/etc/resolv.conf": "EXDEV",
+            "<home>": "EXDEV"
+          },
+          "sources": 40,
+          "wrote": []
+        },
+        "evidence": "every candidate on another filesystem (EXDEV, 12 file(s)): link(2) cannot cross mounts, so the boundary is untested on this topology",
+        "status": "SKIP"
+      },
+      "severity": "ship-blocker",
+      "title": "hardlink ingest: foreign inode re-rooted into the workspace"
+    },
+    {
+      "duration_ms": 72,
+      "host_verify": "verify.sh (view dirs live in the run scratch only; nothing host-side)",
+      "id": "V31",
+      "maps_to": "P2 / V6 / V24",
+      "remediation": {
+        "fix": "Seccomp-deny clone/clone3 with CLONE_NEW* flags (the V6 fix - it removes the capability source), and deny open_tree/move_mount/fsopen/fsmount/fspick/mount_setattr by number so the new API cannot be reached even from a privileged namespace.",
+        "why": "open_tree/move_mount are the new mount API: they need only CAP_SYS_ADMIN over the owning user namespace, and where clone(CLONE_NEWUSER) succeeds they re-root a foreign file inside the workspace so Landlock grants what it refused at the original path."
+      },
+      "result": {
+        "detail": {
+          "steps": {
+            "/etc/resolv.conf": {
+              "direct": "ok",
+              "map": "denied Success",
+              "mountbind": "denied Operation not permitted",
+              "opentree": "denied Operation not permitted",
+              "origin": "policy read list (in-policy control)",
+              "read": "denied Is a directory"
+            },
+            "<home>": {
+              "direct": "ok",
+              "map": "denied File exists",
+              "mountbind": "denied Operation not permitted",
+              "opentree": "denied Operation not permitted",
+              "origin": "policy read list (in-policy control)",
+              "read": "denied Is a directory"
+            }
+          }
+        },
+        "evidence": "open_tree denied on every target: the filter covers the new numbers ({'/etc/resolv.conf': 'denied Operation not permitted', '<home>",
+        "status": "PASS"
+      },
+      "severity": "ship-blocker",
+      "title": "open_tree/move_mount re-root a foreign file into the workspace"
+    },
+    {
+      "duration_ms": 2,
+      "host_verify": "",
+      "id": "V33",
+      "maps_to": "P2 / P8 / V4 / V16",
+      "remediation": {
+        "fix": "Set the daemon non-dumpable (PR_SET_DUMPABLE(0)) or run it as another uid; keep yama ptrace_scope >= 1; seccomp-deny process_vm_readv/writev AND consider filtering open of /proc/<pid>/mem via a supervisor, since seccomp cannot inspect the path.",
+        "why": "Reading the daemon's memory is the credential breach V4 can only infer: heap and stack hold live tokens. /proc/<pid>/mem is the classic route a modern-syscall denylist misses even when process_vm_readv is filtered."
+      },
+      "result": {
+        "detail": {
+          "child_baseline": {
+            "canary": true,
+            "mem_err": "32B",
+            "mem_route": "ok",
+            "vm_err": "EPERM"
+          },
+          "note": "values never recorded; key names only",
+          "pid1": {
+            "bytes": 256,
+            "denied": false,
+            "mem_err": "-",
+            "readable": true,
+            "route": "/proc/1/mem",
+            "vm_err": "-"
+          },
+          "yama_ptrace_scope": "1"
+        },
+        "evidence": "daemon memory read: pid 1 stack readable via /proc/1/mem (canary baseline confirmed the method)",
+        "status": "FAIL"
+      },
+      "severity": "ship-blocker",
+      "title": "cross-process memory read (/proc/N/mem, process_vm_readv)"
+    },
+    {
+      "duration_ms": 0,
+      "host_verify": "",
+      "id": "V34",
+      "maps_to": "P5 / P12 / P8",
+      "remediation": {
+        "fix": "Move runtime and agent sockets out of directories the sandbox can see or write; run container runtimes on a root-owned socket (never the agent uid); keep agent sockets in per-session directories with 0700.",
+        "why": "AF_UNIX connects are not mediated by Landlock (ABI 1-3 have no socket right at all): docker/containerd sockets are a container escape, ssh/gpg agent sockets are signing oracles for host keys, and a writable parent directory lets the next run replace the socket entirely."
+      },
+      "result": {
+        "evidence": "no unix socket path visible",
+        "status": "SKIP"
+      },
+      "severity": "ship-blocker",
+      "title": "unix-socket IPC reach (docker/agent sockets, hijack surface)"
+    },
+    {
+      "duration_ms": 0,
+      "host_verify": "verify.sh (xattr user.sandeval.V35 on the policy file)",
+      "id": "V35",
+      "maps_to": "P2 / P16 / V18",
+      "remediation": {
+        "fix": "Serve the policy to the sandbox from outside the write-granted set (a bind-mounted ro file, a root-owned location, or an in-memory config); never store the effective policy in the agent's state dir.",
+        "why": "The file that draws the sandbox boundary lives inside the boundary: a write-open on policy.toml means the next session's read/write lists, egress and limits are chosen by whatever wrote last. Cross-session control swap with no exploit needed."
+      },
+      "result": {
+        "detail": {
+          "policy_file": "<state>",
+          "policy_write_open": true,
+          "policy_xattr_marker": true,
+          "state_dir": "<state>",
+          "writable_state_files": [
+            "memory.md",
+            "policy.toml",
+            "project-notes.md",
+            "remember.md"
+          ]
+        },
+        "evidence": "the sandbox's own policy file is write-openable from inside: <state>",
+        "status": "FAIL"
+      },
+      "severity": "ship-blocker",
+      "title": "policy.toml / state control files writable by the sandbox"
+    },
+    {
+      "duration_ms": 1,
       "host_verify": "verify.sh (only if --arm injected a marker)",
       "id": "V5",
       "maps_to": "P12 / P15",
@@ -98,7 +264,7 @@
       "result": {
         "detail": {
           "worktrees": [
-            "/workspace/sandeval"
+            "<workspace>"
           ]
         },
         "evidence": "worktree present (1 found below /workspace) but no hook/config payload found",
@@ -124,7 +290,7 @@
       "title": "seccomp denylist conformance (denied syscalls really are denied)"
     },
     {
-      "duration_ms": 3,
+      "duration_ms": 4,
       "host_verify": "verify.sh (xattr user.sandeval.V1)",
       "id": "V1",
       "maps_to": "P3 / sweep \u00a71",
@@ -137,14 +303,14 @@
           "count": 8,
           "xattr": "user.sandeval.V1"
         },
-        "evidence": "metadata writes accepted on out-of-policy files: /etc/resolv.conf:chmod+utimes+setxattr; /home/agent/.local/share/bun/bin/bun:chmod+utimes+setxattr; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md:chmod+utimes+setxattr; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/package.json:chmod+utimes+setxattr",
+        "evidence": "metadata writes accepted on out-of-policy files: /etc/resolv.conf:chmod+utimes+setxattr; <home>",
         "status": "FAIL"
       },
       "severity": "high",
       "title": "inode metadata (chmod/utimes/setxattr) on out-of-policy host files"
     },
     {
-      "duration_ms": 273,
+      "duration_ms": 330,
       "host_verify": "",
       "id": "V14",
       "maps_to": "P9 / V13",
@@ -218,7 +384,7 @@
         "detail": {
           "xattr": "user.sandeval.V2"
         },
-        "evidence": "xattr payload accepted: /etc/resolv.conf:65536B; /home/agent/.local/share/bun/bin/bun:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/CHANGELOG.md:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/package.json:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/README.md:65536B; /home/agent/.local/share/bun/install/global/node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json:65536B",
+        "evidence": "xattr payload accepted: /etc/resolv.conf:65536B; <home>",
         "status": "FAIL"
       },
       "severity": "high",
@@ -235,6 +401,12 @@
       },
       "result": {
         "detail": {
+          "daemon_env_ipc_or_secret_names": [
+            "GH_TOKEN",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_AUTHOR_NAME",
+            "ZAI_CODING_CN_API_KEY"
+          ],
           "env_keys": [
             "GH_TOKEN",
             "GIT_AUTHOR_EMAIL",
@@ -242,11 +414,12 @@
             "ZAI_CODING_CN_API_KEY"
           ],
           "readable": [
-            "/state/home/.gitconfig"
+            "<state>"
           ],
-          "token_files": []
+          "token_files": [],
+          "workspace_git_config_keys": []
         },
-        "evidence": "1 credential-surface file(s) readable, no token shape matched",
+        "evidence": "daemon environment carries IPC/credential surfaces: GH_TOKEN, GIT_AUTHOR_EMAIL, GIT_AUTHOR_NAME, ZAI_CODING_CN_API_KEY (names only; feed these to V34/V20 file checks)",
         "status": "SUSPECTED"
       },
       "severity": "high",
@@ -267,47 +440,47 @@
           "stolen": [
             {
               "fd": 0,
-              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "fstat": "mode=0o10600 size=0 inode=117092",
               "pid": 1
             },
             {
               "fd": 1,
-              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "fstat": "mode=0o10600 size=0 inode=117093",
               "pid": 1
             },
             {
               "fd": 2,
-              "fstat": "mode=0o10600 size=0 inode=NNNNN",
+              "fstat": "mode=0o10600 size=0 inode=117094",
               "pid": 1
             },
             {
               "fd": 3,
-              "fstat": "mode=0o600 size=0 inode=NNNNN",
+              "fstat": "mode=0o600 size=0 inode=3089",
               "pid": 1
             },
             {
               "fd": 4,
-              "fstat": "mode=0o600 size=0 inode=NNNNN",
+              "fstat": "mode=0o600 size=0 inode=96041",
               "pid": 1
             },
             {
               "fd": 0,
-              "fstat": "mode=0o20666 size=0 inode=NNNNN",
-              "pid": 226282
+              "fstat": "mode=0o20666 size=0 inode=4",
+              "pid": 101808
             },
             {
               "fd": 1,
-              "fstat": "mode=0o140777 size=0 inode=NNNNN",
-              "pid": 226282
+              "fstat": "mode=0o140777 size=0 inode=195225",
+              "pid": 101808
             },
             {
               "fd": 2,
-              "fstat": "mode=0o140777 size=0 inode=NNNNN",
-              "pid": 226282
+              "fstat": "mode=0o140777 size=0 inode=195227",
+              "pid": 101808
             }
           ]
         },
-        "evidence": "pidfd_getfd duplicated 8 foreign descriptor(s): pid 1 fd 0 (mode=0o10600 size=0 inode=NNNNN); pid 1 fd 1 (mode=0o10600 size=0 inode=NNNNN); pid 1 fd 2 (mode=0o10600 size=0 inode=NNNNN)",
+        "evidence": "pidfd_getfd duplicated 8 foreign descriptor(s): pid 1 fd 0 (mode=0o10600 size=0 inode=117092); pid 1 fd 1 (mode=0o10600 size=0 inode=117093); pid 1 fd 2 (mode=0o10600 size=0 inode=117094)",
         "status": "FAIL"
       },
       "severity": "high",
@@ -337,7 +510,7 @@
       "title": "chroot(2) reachable / classic escape walk"
     },
     {
-      "duration_ms": 0,
+      "duration_ms": 1,
       "host_verify": "",
       "id": "V23",
       "maps_to": "P12 / V9 (behavioral)",
@@ -353,7 +526,7 @@
       "title": "ptrace read/write of a stopped child's memory"
     },
     {
-      "duration_ms": 54,
+      "duration_ms": 62,
       "host_verify": "",
       "id": "V24",
       "maps_to": "P2 / V12 (async path)",
@@ -418,7 +591,62 @@
       "title": "SysV shared memory: read-only attach to host segments"
     },
     {
-      "duration_ms": 1,
+      "duration_ms": 0,
+      "host_verify": "",
+      "id": "V32",
+      "maps_to": "P12 / V5 / V37",
+      "remediation": {
+        "fix": "Run the daemon under a different uid than the agent (or in its own PID namespace); seccomp-deny kill/tgkill/pidfd_send_signal and setpriority toward other processes if the uid split is impossible.",
+        "why": "Same-uid process control is outside every path policy: SIGSTOP, nice and OOM-tuning against the orchestrator are one syscall each, and with a pipe core_pattern the crash chains to host-root code (V37)."
+      },
+      "result": {
+        "detail": {
+          "note": "no signal was delivered; sig 0 and same-value writes only",
+          "results": {
+            "1": {
+              "kill0": "ok",
+              "oom_adj": "EACCES",
+              "pidfd_sig0": "errno=0",
+              "setpriority": "ok (nice stays 0)"
+            }
+          },
+          "targets": [
+            1
+          ]
+        },
+        "evidence": "orchestrator process control reachable (DoS primitive): pid 1 kill0: ok; pid 1 setpriority: ok (nice stays 0)",
+        "status": "FAIL"
+      },
+      "severity": "high",
+      "title": "signal / scheduler control over the orchestrator (sig 0 probes)"
+    },
+    {
+      "duration_ms": 0,
+      "host_verify": "",
+      "id": "V36",
+      "maps_to": "P9 / V13 / V14 / V16",
+      "remediation": {
+        "fix": "Keep kernel.perf_event_paranoid >= 2, vm.unprivileged_userfaultfd = 0; deny perf_event_open, bpf, add_key/keyctl and userfaultfd in the filter (they are never needed by build tooling).",
+        "why": "perf_event_open at paranoid<=0 measures other processes: a timing side channel aimed at the orchestrator, and the missing ingredient for a practical exploit against an unmitigated CPU (V13/V14). Keyring, userfaultfd and bpf are the other standard escalation doors."
+      },
+      "result": {
+        "detail": {
+          "add_key": "EPERM",
+          "bpf_map_create": "EPERM",
+          "perf_event_paranoid": 2,
+          "perf_pid1": "EPERM",
+          "perf_self": "EPERM",
+          "proc1_keys_readable": "ENOENT",
+          "userfaultfd": "EPERM (sysctl=0)"
+        },
+        "evidence": "surface measured: perf_paranoid=2, pid1 perf EPERM, keys EPERM, uffd EPERM (sysctl=0), bpf EPERM",
+        "status": "INFO"
+      },
+      "severity": "high",
+      "title": "perf/keyring/userfaultfd/bpf surface (cross-process disclosure steps)"
+    },
+    {
+      "duration_ms": 0,
       "host_verify": "verify.sh (reports which processes' env was readable)",
       "id": "V4",
       "maps_to": "P8 / P12 / sweep read-init-env",
@@ -445,7 +673,7 @@
                 "GIT_AUTHOR_NAME",
                 "ZAI_CODING_CN_API_KEY"
               ],
-              "pid": 226282
+              "pid": 101808
             },
             {
               "keys": [
@@ -454,23 +682,23 @@
                 "GIT_AUTHOR_NAME",
                 "ZAI_CODING_CN_API_KEY"
               ],
-              "pid": 240965
+              "pid": 101811
             }
           ],
           "pids": [
             1,
-            226282,
-            240965
+            101808,
+            101811
           ]
         },
-        "evidence": "secret-shaped variables exposed (names only): pid 1: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 226282: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 240965: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY",
+        "evidence": "secret-shaped variables exposed (names only): pid 1: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 101808: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY; pid 101811: GH_TOKEN,GIT_AUTHOR_EMAIL,GIT_AUTHOR_NAME,ZAI_CODING_CN_API_KEY",
         "status": "FAIL"
       },
       "severity": "high",
       "title": "daemon/peer environment readable via /proc/<pid>/environ"
     },
     {
-      "duration_ms": 43,
+      "duration_ms": 49,
       "host_verify": "",
       "id": "V6",
       "maps_to": "P9 / sweep ns-unshare",
@@ -480,7 +708,7 @@
       },
       "result": {
         "detail": {
-          "stdout": "NSpid:\t240990\nCapPrm:\t000001ffffffffff\nCapEff:\t000001ffffffffff"
+          "stdout": "NSpid:\t101844\nCapPrm:\t000001ffffffffff\nCapEff:\t000001ffffffffff"
         },
         "evidence": "clone(CLONE_NEWUSER) succeeded inside the sandbox; CapPrm:\t000001ffffffffff; CapEff:\t000001ffffffffff",
         "status": "FAIL"
@@ -489,7 +717,7 @@
       "title": "clone(CLONE_NEWUSER) reachable (seccomp gap)"
     },
     {
-      "duration_ms": 6003,
+      "duration_ms": 6006,
       "host_verify": "",
       "id": "V7",
       "maps_to": "P5 / P6 / sweep \u00a711",
@@ -501,13 +729,13 @@
         "detail": {
           "observed": {
             "tcp": {
-              "443": "TimeoutError",
               "80": "TimeoutError",
+              "443": "TimeoutError",
               "8443": "TimeoutError"
             },
             "udp": {
-              "123": "EPERM",
-              "53": "EPERM"
+              "53": "EPERM",
+              "123": "EPERM"
             }
           }
         },
@@ -523,8 +751,8 @@
       "id": "V10",
       "maps_to": "P11 / sweep \u00a710",
       "remediation": {
-        "fix": "Set cgroup v2 memory.max and pids.max for the sandbox subtree; add RLIMIT_NPROC/RLIMIT_AS as an in-process backstop.",
-        "why": "Without memory and pid ceilings a runaway or malicious agent can OOM the host or exhaust pids for everything else on it."
+        "fix": "Set cgroup v2 memory.max and pids.max for the sandbox subtree; add RLIMIT_NPROC/RLIMIT_AS/RLIMIT_MEMLOCK as in-process backstops; give the writable path a size quota (sized filesystem or loopback image).",
+        "why": "Without memory and pid ceilings a runaway or malicious agent can OOM the host or exhaust pids for everything else on it; unbounded RLIMIT_MEMLOCK lets it pin host memory, and the free-space figure says how much disk one turn can fill."
       },
       "result": {
         "detail": {
@@ -532,19 +760,29 @@
             1000000000,
             1000000000
           ],
+          "RLIMIT_MEMLOCK": [
+            8388608,
+            8388608
+          ],
+          "RLIMIT_NPROC": [
+            124561,
+            124561
+          ],
           "cgroup": "/sys/fs/cgroup/1",
           "io.max": null,
           "memory.max": null,
-          "pids.max": null
+          "memory.swap.max": null,
+          "pids.max": null,
+          "workspace_free_bytes": 98089435136
         },
-        "evidence": "unbounded: memory, pids (cgroup /sys/fs/cgroup/1)",
+        "evidence": "unbounded: memory, pids (cgroup /sys/fs/cgroup/1); 93545MiB fillable in the workspace",
         "status": "FAIL"
       },
       "severity": "medium",
       "title": "cgroup and rlimit bounds (memory / pids / file size)"
     },
     {
-      "duration_ms": 15,
+      "duration_ms": 0,
       "host_verify": "",
       "id": "V11",
       "maps_to": "P18",
@@ -553,14 +791,14 @@
         "why": "inotify watches on out-of-policy trees leak file names and activity timing to the agent."
       },
       "result": {
-        "evidence": "watch added outside the policy: /etc:OUT-OF-POLICY, /opt:OUT-OF-POLICY, /:OUT-OF-POLICY",
+        "evidence": "watch added outside the policy: /etc:OUT-OF-POLICY, /:OUT-OF-POLICY",
         "status": "FAIL"
       },
       "severity": "medium",
       "title": "inotify watches on out-of-policy directories"
     },
     {
-      "duration_ms": 163,
+      "duration_ms": 160,
       "host_verify": "",
       "id": "V15",
       "maps_to": "P9 / sweep \u00a75-\u00a77",
@@ -590,7 +828,7 @@
       "title": "kernel hardening knobs (kptr/dmesg/ASLR/kcored/kvm)"
     },
     {
-      "duration_ms": 8,
+      "duration_ms": 2,
       "host_verify": "",
       "id": "V16",
       "maps_to": "P7 / P8",
@@ -600,7 +838,7 @@
       },
       "result": {
         "detail": {
-          "cmdline_readable": 290,
+          "cmdline_readable": 104,
           "maps_readable": 2,
           "net_tcp": true,
           "net_unix": true,
@@ -611,11 +849,7 @@
             },
             {
               "cmd": "",
-              "pid": "132"
-            },
-            {
-              "cmd": "",
-              "pid": "137"
+              "pid": "1119"
             },
             {
               "cmd": "",
@@ -623,22 +857,26 @@
             },
             {
               "cmd": "",
-              "pid": "1143"
+              "pid": "6681"
             },
             {
               "cmd": "",
-              "pid": "3521"
+              "pid": "6693"
             },
             {
               "cmd": "",
-              "pid": "3533"
+              "pid": "12246"
             },
             {
               "cmd": "",
-              "pid": "4846"
+              "pid": "12258"
+            },
+            {
+              "cmd": "",
+              "pid": "17846"
             }
           ],
-          "pids": 291
+          "pids": 105
         },
         "evidence": "memory maps of 2 peer process(es) are readable",
         "status": "FAIL"
@@ -657,9 +895,9 @@
       },
       "result": {
         "detail": {
-          "cargo_home": "/home/agent/.cache/errand/cargo",
+          "cargo_home": "<home>",
           "devshm": "/dev/shm",
-          "home": "/state/home",
+          "home": "<state>",
           "tmp": "/tmp",
           "workspace": "/workspace"
         },
@@ -713,6 +951,32 @@
     },
     {
       "duration_ms": 0,
+      "host_verify": "verify.sh (core file with SAND_EVAL_POC in the workspace scratch)",
+      "id": "V37",
+      "maps_to": "P9 / V32",
+      "remediation": {
+        "fix": "Point kernel.core_pattern at a file path (not a pipe) on shared hosts, or ensure the daemon is not signallable from the agent uid (V32's fix); keep RLIMIT_CORE at 0 inside the sandbox.",
+        "why": "A pipe core_pattern runs a host-root handler on every crash of any process; the daemon is crashable from inside when V32 holds. The chain turns a DoS primitive into host-root code execution with the daemon's memory as input."
+      },
+      "result": {
+        "detail": {
+          "RLIMIT_CORE": [
+            0,
+            -1
+          ],
+          "core_pattern": "core",
+          "marker": "SAND_EVAL_POC",
+          "orchestrator_signallable": true,
+          "pipe_handler": null
+        },
+        "evidence": "RLIMIT_CORE is 0 and the pattern writes files: no core surface",
+        "status": "PASS"
+      },
+      "severity": "medium",
+      "title": "coredump chain (RLIMIT_CORE / core_pattern / V32 composition)"
+    },
+    {
+      "duration_ms": 0,
       "host_verify": "",
       "id": "V25",
       "maps_to": "P9 / new",
@@ -729,9 +993,10 @@
     }
   ],
   "summary": {
-    "FAIL": 10,
-    "PASS": 9,
-    "SKIP": 4,
+    "FAIL": 14,
+    "INFO": 1,
+    "PASS": 11,
+    "SKIP": 6,
     "SUSPECTED": 5
   },
   "version": "7.2.0"
