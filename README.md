@@ -307,6 +307,9 @@ python3 -c "import json; d=json.load(open('sandeval-report.json')); \
     # [pid 1 fd 0/1 fstat lines: the stolen descriptors are real]
 host-verify/verify.sh
     # [FOUND: the xattr markers, host-side]
+./bin/sandeval run --vector V38 --in . --out /opt
+    # [FAIL: named host binary dosed (chmod->0, exec EACCES), restored
+    #  byte-identical, tool runs again - the practical impact proof]
 ```
 
 Cleanup is the other half of the proof, and it is verified the same way:
