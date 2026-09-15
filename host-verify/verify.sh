@@ -6,10 +6,13 @@
 # effect is visible here. Nothing in the sandbox's own report counts.
 #
 #   host-verify/verify.sh            # report what was found
-#   host-verify/verify.sh --clean    # remove this harness's markers
+#   host-verify/verify.sh --clean    # remove this harness's removable markers
 #
 # The git vector's proof is written by the daemon itself, so it can only be
-# checked after the turn that armed it has ended.
+# checked after the turn that armed it has ended. Content markers (the
+# SAND_EVAL_POC lines V29/V30 append through foreign descriptors and
+# hardlinks) are reported but NOT removed by --clean: un-appending host file
+# content is an operator decision, and the line is the proof.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,13 +50,17 @@ done
 [ -f "$WORKSPACE/HOST-passwd.txt" ] && found "$WORKSPACE/HOST-passwd.txt (host passwd copied out)"
 [ -f "$proof" ] || [ -f "$HOME_DIR/HOST-RCE-marker" ] || clear_ "no git payload proof present"
 
-# --- xattr markers written from inside the sandbox (V1, V2, prior PoCs) ----- #
+# --- xattr markers written from inside the sandbox (V1, V2, V35, prior PoCs) - #
 say ""
 say "xattr markers on host files:"
-python3 - "$WORKSPACE" "$HOME_DIR" <<'PY'
+POLICY_FILE="${SANDEVAL_POLICY:-/state/policy.toml}"
+[ -f "$POLICY_FILE" ] || POLICY_FILE=""
+python3 - "$WORKSPACE" "$HOME_DIR" "$POLICY_FILE" <<'PY'
 import os, sys
-workspace, home = sys.argv[1], sys.argv[2]
+workspace, home, policy = sys.argv[1], sys.argv[2], sys.argv[3]
 extra = [p for p in os.environ.get("SANDEVAL_HOST_FILES", "").split(":") if p]
+if policy:
+    extra.append(policy)
 candidates = ["/etc/resolv.conf", "/etc/hostname", "/etc/hosts"] + extra
 
 
@@ -102,6 +109,70 @@ sys.exit(0 if hits == 0 else 3)
 PY
 case $? in 0) ;; *) findings=$((findings+1));; esac
 
+# --- content markers (V29 foreign-fd / V30 hardlink / V37 core) ------------ #
+say ""
+say "SAND_EVAL_POC content markers (appended by V29/V30 through allowed-but-"
+say "should-be-denied writes; removal is an operator decision, not --clean):"
+python3 - "$WORKSPACE" "$HOME_DIR" "$ROOT" <<'PY'
+import os, sys
+roots = [r for r in (sys.argv[1], sys.argv[2], "/state") if r and os.path.isdir(r)]
+exclude_root = os.path.realpath(sys.argv[3]) if len(sys.argv) > 3 else None
+needle = b"SAND_EVAL_POC"
+hits = 0
+
+def walk(root, depth=0, max_depth=3):
+    if depth > max_depth:
+        return
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return
+    for name in sorted(entries):
+        path = os.path.join(root, name)
+        try:
+            if os.path.islink(path):
+                continue
+            if os.path.isfile(path):
+                yield path
+            elif os.path.isdir(path):
+                yield from walk(path, depth + 1, max_depth)
+        except OSError:
+            continue
+
+seen = set()
+for root in roots:
+    for path in walk(root):
+        if path in seen:
+            continue
+        seen.add(path)
+        if exclude_root and os.path.realpath(path).startswith(exclude_root + os.sep):
+            continue  # the harness's own sources name the marker; not a finding
+        try:
+            with open(path, "rb") as handle:
+                if needle in handle.read(65536):
+                    line = ""
+                    with open(path, "rb") as handle:
+                        for raw in handle:
+                            if needle in raw:
+                                line = raw.decode("utf-8", "replace").strip()
+                                break
+                    print(f"  FOUND  {path}: {line[:120]}")
+                    hits += 1
+        except OSError:
+            continue
+        if hits >= 10:
+            break
+    if hits >= 10:
+        break
+if not hits:
+    print("  clear  no SAND_EVAL_POC content markers")
+sys.exit(0 if hits == 0 else 3)
+PY
+case $? in
+  0) ;;
+  *) findings=$((findings+1));;
+esac
+
 # --- CPU speculative-execution status (V13/V14) ---------------------------- #
 say ""
 say "CPU speculative-execution status (host view):"
@@ -138,10 +209,14 @@ if [ "$MODE" = "--clean" ]; then
   say "cleaning:"
   rm -f "$proof" "$WORKSPACE/HOST-passwd.txt" "$HOME_DIR/HOST-RCE-marker" /tmp/HOST-RCE-marker \
         /tmp/SANDEVAL_POC /tmp/SANDEVAL_POC_V2 /dev/shm/SANDEVAL_POC
-  python3 - "$WORKSPACE" "$HOME_DIR" <<'PY'
+  python3 - "$WORKSPACE" "$HOME_DIR" "$POLICY_FILE" <<'PY'
 import os, sys
-workspace, home = sys.argv[1], sys.argv[2]
+workspace, home, policy = sys.argv[1], sys.argv[2], sys.argv[3]
 extra = [p for p in os.environ.get("SANDEVAL_HOST_FILES", "").split(":") if p]
+if policy:
+    extra.append(policy)
+
+
 prefixes = ("user.sandeval", "user.SANDEVAL", "user.poc")
 
 
@@ -181,7 +256,7 @@ for root in roots:
                         pass
         except OSError:
             continue
-for path in extra + ["/etc/resolv.conf", "/etc/hostname"]:
+for path in extra + [p for p in ("/etc/resolv.conf", "/etc/hostname", policy) if p]:
     try:
         for name in os.listxattr(path):
             if name.startswith(prefixes):
