@@ -134,7 +134,10 @@ class ForeignFdWriteVector(Vector):
         pipe_note = ""
         if pipe:
             ok, why = pipe
-            pipe_note = f"; orchestrator stdout: {'marker written' if ok else why}"
+            pipe_note = f"; orchestrator stdout: {'write accepted' if ok else why}"
+            if ok:
+                pipe_note += " (delivery to the operator transcript is daemon-dependent and " \
+                             "cannot be scored from inside - check the session log for the marker)"
 
         detail = {
             "candidates": len(candidates),
@@ -155,8 +158,10 @@ class ForeignFdWriteVector(Vector):
         if pipe and pipe[0]:
             return Result(
                 Status.FAIL,
-                "orchestrator transcript injection: SAND_EVAL_POC written to pid 1 fd 1 "
-                "(no out-of-policy regular file was open for append this run)",
+                "write accepted into the orchestrator's stdout pipe (pid 1 fd 1, duplicated "
+                "via pidfd_getfd): the control plane consumes attacker bytes. Whether the "
+                "daemon delivers them depends on its framing - grep the session log for "
+                "the SAND_EVAL_POC V29 line host-side",
                 detail,
             )
         if capable_unwritten or eligible:

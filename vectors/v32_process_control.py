@@ -13,6 +13,8 @@ with a pipe `core_pattern` (V37) it chains to host-root code execution.
 """
 import ctypes
 import os
+import signal
+import time
 
 try:
     from sandeval.base import Result, Status, Vector, errno_name
@@ -104,7 +106,9 @@ class ProcessControlVector(Vector):
                     successes.append(f"pid {pid} {name}: {res}")
 
         detail = {"targets": targets, "results": results,
-                  "note": "no signal was delivered; sig 0 and same-value writes only"}
+                  "note": "no signal delivered to the orchestrator; sig 0 and same-value "
+                          "writes only - the full primitive is demonstrated on a "
+                          "sacrificial own child instead"}
         if successes:
             return Result(
                 Status.FAIL,
@@ -117,6 +121,33 @@ class ProcessControlVector(Vector):
             f"({results[targets[0]] if targets else 'no target'})",
             detail,
         )
+
+    @staticmethod
+    def _sacrificial_demo():
+        """SIGSTOP/setpriority for real on our own child; state and nice observed."""
+        out = {}
+        try:
+            pid = os.fork()
+        except OSError:
+            return out
+        if pid == 0:
+            time.sleep(30)
+            os._exit(0)
+        try:
+            os.kill(pid, signal.SIGSTOP)
+            time.sleep(0.05)
+            out["sigstop"] = open(f"/proc/{pid}/stat").read().split()[2] == "T"
+            os.setpriority(os.PRIO_PROCESS, pid, 19)
+            out["nice19"] = os.getpriority(os.PRIO_PROCESS, pid) == 19
+        except (OSError, IndexError):
+            pass
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+        return out
 
 
 VECTOR = ProcessControlVector()

@@ -358,53 +358,96 @@ vectors V29-V37 take each primitive to its conclusion and leave a literal
 `SAND_EVAL_POC` marker in whatever host file the write lands in;
 `host-verify/verify.sh` scores the markers from outside.
 
-### V29 — foreign-fd content write (FAIL, ship-blocker)
+### V29 — foreign-fd content write (FAIL; delivery unverified)
 
 V21 proved pidfd_getfd and stopped at fstat; V5 proved /proc/1/fd/N
 write-open and stopped at the open. V29 finishes the thought: it reads the
 daemon's fd table (fdinfo gives the open flags before anything is
 duplicated), dups descriptors that carry O_APPEND, and appends a one-line
-`SAND_EVAL_POC V29` marker. Live result: the daemon's own session log on the
-host now contains the marker line (confirmed by verify.sh), and pid 1's
-stdout got the marker too - the transcript the operator reads. Descriptors
-in write mode WITHOUT O_APPEND are reported as a capability and deliberately
-left unwritten: writes through them would land at the victim's shared offset
-and corrupt its stream. The asymmetry the filter shows (process_vm_readv
-denied, /proc fd duplication allowed) is the finding: modern syscalls were
-named, the classic dup route was not.
+`SAND_EVAL_POC V29` marker to eligible files, plus one line into pid 1's
+stdout pipe. What the post-v8 audit established, honestly:
 
-### V33 — cross-process memory read (FAIL, ship-blocker)
+- The write primitive is real: the orchestrator's stdout pipe accepts
+  attacker bytes through a duplicated descriptor.
+- Delivery is NOT demonstrated: the exact injected line
+  (`SANDEVAL-DELIVERY-TEST <ts>`) does not appear in the session transcript,
+  which suggests the daemon drops unframed bytes from that pipe. The finding
+  is therefore "control pipe write accepted", not "transcript injection
+  observed"; whether a given daemon can be driven through its stdout is
+  framing-dependent and scored host-side by grepping the log for the marker.
+- No out-of-policy regular file was open for append during any run of this
+  pass, so the file-write variant has no live artifact here yet; the vector
+  is wired for it and would leave the marker for verify.sh to score.
 
-The logical conclusion of V4/V16: environ and maps are previews, the memory
-itself is the prize. A canary child proves the method works (fork a child
-that publishes a buffer address, recover the 32 known bytes), then the same
-two primitives point at pid 1's [stack] top where the environment lives.
-Live result: `pread` on `/proc/1/mem` returns the daemon's stack bytes.
-`process_vm_readv` (310) is EPERM - the denylist names it - but nobody
-filtered the classic procfs file route, and seccomp cannot inspect paths.
-With V13/V14 (unmitigated CPU, live Spectre repro) and V16 (peer maps as the
-target map) this is a complete cross-process disclosure chain. Evidence
-carries byte counts and key NAMES only, never values.
+Descriptors in write mode WITHOUT O_APPEND are reported as a capability and
+deliberately left unwritten: writes through them would land at the victim's
+shared offset and corrupt its stream. process_vm_readv is denied while the
+classic fd-dup route is open - the modern syscalls were named by the filter,
+the classic route was not.
 
-### V35 — the sandbox's own policy file is writable (FAIL, ship-blocker)
+### V33 — cross-process memory read (FAIL; primitive proven, payload bounded)
+
+The canary child proves the method (fork, publish a buffer address, recover
+the 32 known bytes), then the same primitives point at pid 1. Live results:
+
+- `/proc/1/mem` reads the daemon's stack. `process_vm_readv` (310) is EPERM:
+  the denylist names the modern syscall, not the classic procfs route, which
+  seccomp cannot inspect because it cannot see paths.
+- Route independence, hash-verified: the credential the sandbox legitimately
+  holds (GH_TOKEN from errand's env pass list) was re-recovered from the
+  daemon's stack through the memory route alone. Close the environ read and
+  the memory route still yields it. Values are never recorded; evidence
+  carries a sha256 prefix and the address.
+- Deep scan, the honest negative: ~106MB of pid 1's live anonymous memory
+  (heap, stacks) scanned for token shapes beyond environ - ZERO found. The
+  earlier claim that "the heap holds the tokens V4 only infers" was
+  asserted, not shown, and is withdrawn. On this deployment every visible
+  env secret is in errand's explicit `[env] pass` list (by design), the
+  daemon-only secrets are not visible from inside, and the memory scan found
+  no additional payload. The PRIMITIVE is the finding: any secret the daemon
+  ever holds only in memory is exposed, and no environ-level fix closes it.
+
+### V35 — the sandbox's own policy file is writable (FAIL; persistence conditional)
 
 The policy that draws the boundary (`/state/policy.toml`) lives inside the
 write-granted state dir. V35 opens it O_WRONLY and closes it - no byte
 written, no truncate - and sets an xattr marker the host verifier removes.
 Live result: write-open succeeds, plus four more state control files are
-write-openable. Whoever runs this code chooses the next session's read/write
-lists, egress and limits: a cross-session control swap that needs no
-exploit at all. The fix is placement, not filtering: serve the policy from
-outside the write-granted set.
+write-openable. The post-v8 audit added the honest qualifier: the file's own
+header says "Generated per session by errand. Do not edit." and its mtime
+changes mid-session, so errand actively regenerates it - a tamper would be
+overwritten, and the cross-session "attacker chooses the next boundary"
+claim is NOT demonstrated. The proven window is generation-to-read: if the
+sandbox engine ever reads the file after an agent-writable moment, the
+attacker owns the cage. No tamper was performed (a corrupted policy could
+break the next session, which is not this harness's call). Severity is
+high, not ship-blocker, for exactly this reason.
 
-### V32 — orchestrator process control (FAIL, high)
+### V32 — orchestrator process control (FAIL; demonstrated on a stand-in)
 
-Same-uid process control is invisible to any path policy. Sig-0 probes only:
-`kill(pid 1, 0)` ok, `setpriority(pid 1, current)` ok, pidfd_send_signal
-EPERM (the filter names 424), oom_score_adj EACCES. The daemon can be
-SIGSTOPped, parked at nice 19, and (with V37) crashed into a pipe
-core_pattern if one existed. No signal was ever delivered; every probe is
-permission-only or value-preserving.
+Same-uid process control is invisible to any path policy. Every run now
+carries the full-primitive demonstration on a sacrificial own child:
+SIGSTOP observed as state T, setpriority to nice 19 observed in
+`getpriority` - the primitives work end-to-end. Against the orchestrator
+itself, the SAME permission gate (`check_kill_permission`) was exercised
+with sig 0 and passes for pid 1; a real signal was deliberately withheld
+because it would DoS the operator's live session. pidfd_send_signal is EPERM
+(the filter names 424), oom_score_adj is EACCES. With a pipe core_pattern
+this composes to V37's host-root chain; none exists here.
+
+### V4 revision — the env secrets are the pass list
+
+The original V4 writeup ("the daemon's environment holds its own API
+tokens") does not reproduce on this deployment. Every secret-shaped variable
+visible from inside the sandbox (GH_TOKEN, ZAI_CODING_CN_API_KEY, git
+identities) is in errand's explicit `[env] pass` list - the agent is meant
+to have them; that is the working credential set, not a leak. The daemon's
+own secrets are not visible from inside. V4's live FAIL therefore reports
+"secret-shaped variables exposed (names only)" as telemetry for the pass
+list, and its remediation is "keep the pass list minimal", not "secrets in
+daemon env". The memory-read vector (V33) is what makes the pass list
+matter: anything on it is recoverable from the daemon's stack even if the
+environ read were closed.
 
 ### V31 — new mount API ingest (PASS here, ship-blocker elsewhere)
 

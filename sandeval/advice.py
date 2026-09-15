@@ -122,7 +122,7 @@ ADVICE = {
         "fix": "Create the sandbox in a new IPC namespace (clone(CLONE_NEWIPC)/unshare -i) or seccomp-deny shmget/shmat; prefer POSIX shm under a policy-controlled directory.",
     },
     "V29": {
-        "why": "A duplicated foreign write descriptor is a content write to a host file the policy never granted: the daemon's own logs and the transcript the operator reads. Markers left as SAND_EVAL_POC lines are confirmable with host-verify/verify.sh.",
+        "why": "A duplicated foreign write descriptor lets the agent write into the orchestrator's own stdout pipe: the control plane consumes attacker bytes. Delivery to the operator transcript depends on daemon framing - verify.sh greps the session log for the marker; on the reference deployment the pipe accepted the write but no injected line was observed in the transcript.",
         "fix": "Run the agent in its own PID namespace, or drop the daemon's privileges so its fds are not ptrace-reachable from the agent uid; seccomp-deny pidfd_open/pidfd_getfd as a belt-and-braces.",
     },
     "V30": {
@@ -138,7 +138,7 @@ ADVICE = {
         "fix": "Run the daemon under a different uid than the agent (or in its own PID namespace); seccomp-deny kill/tgkill/pidfd_send_signal and setpriority toward other processes if the uid split is impossible.",
     },
     "V33": {
-        "why": "Reading the daemon's memory is the credential breach V4 can only infer: heap and stack hold live tokens. /proc/<pid>/mem is the classic route a modern-syscall denylist misses even when process_vm_readv is filtered.",
+        "why": "Reading the daemon's memory is the strongest confidentiality primitive at the same uid: on the reference deployment it re-recovers the sandbox's own credential from the stack through /proc/1/mem alone (route-independent of the environ read), and a 100MB+ scan found no additional secrets - the primitive is proven; the extra payload depends on what the daemon keeps only in memory.",
         "fix": "Set the daemon non-dumpable (PR_SET_DUMPABLE(0)) or run it as another uid; keep yama ptrace_scope >= 1; seccomp-deny process_vm_readv/writev AND consider filtering open of /proc/<pid>/mem via a supervisor, since seccomp cannot inspect the path.",
     },
     "V34": {
@@ -146,7 +146,7 @@ ADVICE = {
         "fix": "Move runtime and agent sockets out of directories the sandbox can see or write; run container runtimes on a root-owned socket (never the agent uid); keep agent sockets in per-session directories with 0700.",
     },
     "V35": {
-        "why": "The file that draws the sandbox boundary lives inside the boundary: a write-open on policy.toml means the next session's read/write lists, egress and limits are chosen by whatever wrote last. Cross-session control swap with no exploit needed.",
+        "why": "The file that draws the sandbox boundary lives inside the boundary and is write-openable: a tamper primitive, not yet a control swap. errand regenerates the file per session (observed), so persistence is unproven - the attack window is whatever gap exists between generation and the sandbox's read of it.",
         "fix": "Serve the policy to the sandbox from outside the write-granted set (a bind-mounted ro file, a root-owned location, or an in-memory config); never store the effective policy in the agent's state dir.",
     },
     "V36": {

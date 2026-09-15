@@ -14,6 +14,7 @@ rewrite is never attempted: a corrupted policy could break the next session,
 which is not this harness's call to make.
 """
 import os
+import time
 
 try:
     from sandeval.base import Result, Status, Vector, errno_name
@@ -31,7 +32,7 @@ XATTR = "user.sandeval.V35"
 class PolicyIntegrityVector(Vector):
     id = "V35"
     title = "policy.toml / state control files writable by the sandbox"
-    severity = "ship-blocker"
+    severity = "high"
     maps_to = "P2 / P16 / V18"
     description = __doc__
     host_verify = "verify.sh (xattr user.sandeval.V35 on the policy file)"
@@ -55,11 +56,12 @@ class PolicyIntegrityVector(Vector):
 
         if open_ok:
             others_note = f"; {len(others)} more writable control file(s)" if others else ""
+            regen = self._regeneration_note(policy)
             return Result(
                 Status.FAIL,
                 f"the sandbox's own policy file is write-openable from inside: {policy} "
                 f"(open O_WRONLY proved without writing, xattr marker: {xattr_ok}{others_note}) - "
-                "the next session's boundary is attacker-chosen",
+                f"tamper primitive proven{regen}",
                 detail,
             )
         if xattr_ok:
@@ -91,6 +93,21 @@ class PolicyIntegrityVector(Vector):
             except OSError:
                 pass
         return Result(Status.INFO, f"removed {removed} xattr marker(s)" if removed else "nothing to undo")
+
+    def _regeneration_note(self, policy):
+        """Cross-session persistence of a tamper is conditional: if the daemon
+        regenerates the file (fresh mtime, 'generated per session' headers),
+        an edit is overwritten. State what was observed, honestly."""
+        try:
+            with open(policy, "rb") as handle:
+                head = handle.read(200).decode("utf-8", "replace").lower()
+            age_days = (time.time() - os.path.getmtime(policy)) / 86400
+            if "generated" in head or "do not edit" in head:
+                return f"; header says generated per session (mtime age {age_days:.3f}d), so a " \
+                       "tamper likely does not persist - the window is generation-to-read only"
+        except OSError:
+            pass
+        return "; no regeneration marker found in the file header"
 
     @staticmethod
     def _write_open(path):

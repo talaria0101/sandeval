@@ -13,6 +13,7 @@ top of its `[stack]` mapping where the environment lives. Evidence reports
 printable-byte counts and key NAMES only, never values.
 """
 import ctypes
+import hashlib
 import os
 import platform
 import re
@@ -69,6 +70,17 @@ class MemReadVector(Vector):
     description = __doc__
     host_verify = ""
 
+    # Token shapes the deep scan looks for in live anonymous memory.
+    TOKEN_SHAPES = (
+        (rb"gh[pousr]_[A-Za-z0-9]{20,}", "github"),
+        (rb"github_pat_[A-Za-z0-9_]{20,}", "github-pat"),
+        (rb"sk-[A-Za-z0-9-]{20,}", "api-key"),
+        (rb"xox[baprs]-[A-Za-z0-9-]{10,}", "slack"),
+        (rb"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", "jwt"),
+        (rb"AKIA[0-9A-Z]{16}", "aws"),
+    )
+    SCAN_BUDGET = 96 * 1024 * 1024
+
     def check(self, ctx):
         arch = platform.machine()
         nums = NUMBERS.get(arch)
@@ -89,19 +101,36 @@ class MemReadVector(Vector):
         baseline = self._probe_child(nums)
         target = self._probe_pid(1, nums)
 
+        # Route independence: is a secret the sandbox already holds (from the
+        # daemon env) ALSO recoverable through the memory route alone? Hash
+        # matched - the value is never recorded.
+        route_proof = self._route_independence()
+        # Deep scan: token-shaped values in live anon memory NOT covered by
+        # the environ read. This is what would make memory read strictly
+        # stronger than V4 on a given deployment.
+        deep = self._deep_scan()
+
         detail = {
             "yama_ptrace_scope": yama,
             "child_baseline": baseline,
             "pid1": {k: v for k, v in target.items() if k != "keys"},
-            "note": "values never recorded; key names only",
+            "route_independence": route_proof,
+            "deep_scan": deep,
+            "note": "values never recorded; hashes and counts only",
         }
         if baseline.get("canary") and target.get("readable"):
             keys = target.get("keys") or []
             shown = f"; token-shaped env keys visible: {', '.join(keys[:5])}" if keys else ""
+            extra = ""
+            if route_proof.get("match"):
+                extra = f"; a credential already in the sandbox env was re-recovered from pid 1 stack " \
+                        f"via /proc/1/mem alone (sha256:{route_proof['sha']}, value not shown)"
+            if deep.get("hits"):
+                extra += f"; {len(deep['hits'])} secret-shaped value(s) in live memory beyond environ"
             return Result(
                 Status.FAIL,
                 "daemon memory read: pid 1 stack readable via "
-                f"{target['route']} (canary baseline confirmed the method){shown}",
+                f"{target['route']} (canary baseline confirmed the method){shown}{extra}",
                 detail,
             )
         if baseline.get("canary") and target.get("denied"):
@@ -225,6 +254,93 @@ class MemReadVector(Vector):
         if res <= 0:
             return None, errno_name(OSError(err, "process_vm_readv"))
         return local.raw[:res], None
+
+    def _route_independence(self):
+        """Recover an env credential through /proc/1/mem ONLY (hash check)."""
+        out = {"match": False}
+        try:
+            with open("/proc/1/environ", "rb") as handle:
+                env = handle.read()
+        except OSError:
+            return out
+        creds = [v for v in env.split(b"\0") if b"=" in v and len(v.split(b"=", 1)[1]) >= 16]
+        if not creds:
+            return out
+        top = stack_top(1)
+        if not top:
+            return out
+        try:
+            mem = open("/proc/1/mem", "rb")
+        except OSError:
+            return out
+        try:
+            for off in range(0, 1024 * 1024, 65536):
+                addr = top - off - 65536
+                if addr < 0:
+                    break
+                try:
+                    mem.seek(addr)
+                    data = mem.read(65536)
+                except OSError:
+                    continue
+                for cred in creds:
+                    if cred in data:
+                        out["match"] = True
+                        out["sha"] = hashlib.sha256(cred).hexdigest()[:16]
+                        out["addr"] = hex(addr)
+                        return out
+        finally:
+            mem.close()
+        return out
+
+    def _deep_scan(self):
+        """Token-shaped values in pid 1's anon memory, beyond environ."""
+        out = {"scanned_bytes": 0, "hits": []}
+        try:
+            env = open("/proc/1/environ", "rb").read()
+        except OSError:
+            env = b""
+            out["env_read"] = "unreadable (deep scan cannot subtract environ)"
+        env_blob = b"\n".join(v for v in env.split(b"\0") if b"=" in v)
+        try:
+            maps = open("/proc/1/maps").read().splitlines()
+            mem = open("/proc/1/mem", "rb")
+        except OSError:
+            return out
+        with mem:
+            for line in maps:
+                if out["scanned_bytes"] >= self.SCAN_BUDGET:
+                    break
+                parts = line.split()
+                if "r" not in parts[1]:
+                    continue
+                path = parts[5] if len(parts) > 5 else "[anon]"
+                if path.startswith("/"):
+                    continue  # file-backed code/rodata: string constants, not live secrets
+                start_s, end_s = parts[0].split("-")
+                start, end = int(start_s, 16), int(end_s, 16)
+                if end - start > 256 * 1024 * 1024:
+                    continue
+                try:
+                    mem.seek(start)
+                    data = mem.read(end - start)
+                except OSError:
+                    continue
+                out["scanned_bytes"] += len(data)
+                for rx, label in self.TOKEN_SHAPES:
+                    for match in re.finditer(rx, data):
+                        tok = match.group(0)
+                        if tok in env_blob:
+                            continue
+                        out["hits"].append({
+                            "shape": label,
+                            "sha256": hashlib.sha256(tok).hexdigest()[:16],
+                            "len": len(tok),
+                            "region": path,
+                        })
+                        break  # one hit per shape per region is enough
+        out["hits"] = out["hits"][:8]
+        return out
 
     @staticmethod
     def _environ_readable():
