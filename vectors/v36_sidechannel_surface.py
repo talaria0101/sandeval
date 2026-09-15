@@ -114,14 +114,14 @@ class SidechannelSurfaceVector(Vector):
         Self-measurement is the baseline; pid 1 is the cross-boundary case.
         Returns errno names, or `fd <n>` on success (fd is closed).
         """
-        # struct perf_event_attr: .size at offset 8, type=0 (HARDWARE),
-        # config=0 (CPU cycles), disabled=1, exclude_kernel=1.
+        # struct perf_event_attr: type u32@0, size u32@4, config u64@8,
+        # ..., flags u64@40 with disabled=bit0 and exclude_kernel=bit5.
         attr = ctypes.create_string_buffer(120)
         ctypes.memset(attr, 0, 120)
-        attr[8:12] = (120).to_bytes(4, "little")
-        attr[12:16] = (0).to_bytes(4, "little")  # type = HARDWARE
-        attr[16:24] = (0).to_bytes(8, "little")  # config = CPU cycles
-        attr[40:48] = (1 | (1 << 5)).to_bytes(8, "little")  # disabled | exclude_kernel(1<<5)
+        attr[0:4] = (0).to_bytes(4, "little")  # type = HARDWARE
+        attr[4:8] = (120).to_bytes(4, "little")  # size
+        attr[8:16] = (0).to_bytes(8, "little")  # config = CPU cycles
+        attr[40:48] = (1 | (1 << 5)).to_bytes(8, "little")  # disabled | exclude_kernel
 
         def open_one(pid):
             fd, err = raw_syscall(
@@ -183,13 +183,14 @@ class SidechannelSurfaceVector(Vector):
     @staticmethod
     def _bpf(nums):
         # BPF_MAP_CREATE with a zeroed attr of plausible size; EPERM expected.
+        # bpf_attr for MAP_CREATE: map_type u32@0, key_size u32@4,
+        # value_size u32@8, max_entries u32@12; the rest stays zero.
         attr = ctypes.create_string_buffer(120)
         ctypes.memset(attr, 0, 120)
         attr[0:4] = (1).to_bytes(4, "little")  # BPF_MAP_TYPE_HASH
         attr[4:8] = (8).to_bytes(4, "little")  # key_size
         attr[8:12] = (8).to_bytes(4, "little")  # value_size
         attr[12:16] = (1).to_bytes(4, "little")  # max_entries
-        attr[116:120] = (120).to_bytes(4, "little")  # btf... size field end
         fd, err = raw_syscall(nums["bpf"], 0, ctypes.cast(attr, ctypes.c_void_p), 120, 0)
         if fd >= 0:
             os.close(fd)

@@ -14,8 +14,9 @@ land at the victim's shared file offset.
 
 The orchestrator's stdout (pid 1 fd 1) gets the same one-line marker: it is
 the control channel the operator reads, and the marker is the proof that
-transcript injection does not need `--arm`. Pid 1's stdin is never written
-without `--arm`, because that is the daemon's command stream.
+transcript injection needs no `--arm` and no vulnerability in the agent. Pid
+1's stdin is never written by this vector, because that is the daemon's
+command stream.
 """
 import os
 import time
@@ -168,6 +169,13 @@ class ForeignFdWriteVector(Vector):
             )
         if dup_denied and not candidates:
             return Result(Status.PASS, f"no foreign fd duplicated ({list(dup_denied)[:2]})", detail)
+        if dup_denied and not eligible and not capable_unwritten:
+            return Result(
+                Status.PASS,
+                f"write-mode foreign fds exist but every pidfd_getfd was denied "
+                f"({sorted(set(dup_denied.values()))[:2]})",
+                detail,
+            )
         return Result(
             Status.PASS,
             "no process holds a write-mode fd to an out-of-policy regular file; nothing to inject",
@@ -213,20 +221,8 @@ class ForeignFdWriteVector(Vector):
                 os.close(dup)
         return False, "pid 1 not visible"
 
-    # pid 1's stdin is the daemon command stream: written only under --arm.
-    def arm_stdin(self, ctx):
-        if not ctx.arm:
-            return False
-        dup = self._dup_fd(1, 0)
-        if dup is None:
-            return False
-        try:
-            os.write(dup, marker_line("V29", "target=pid1-stdin-ARMED").encode())
-            return True
-        except OSError:
-            return False
-        finally:
-            os.close(dup)
+    # Pid 1's stdin is the daemon's command stream and is NEVER written by
+    # this vector: marker lines go to the transcript (fd 1) only.
 
 
 VECTOR = ForeignFdWriteVector()

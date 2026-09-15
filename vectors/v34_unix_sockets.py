@@ -15,6 +15,7 @@ the IPC.
 import os
 import re
 import socket
+import stat as stat_mod
 
 try:
     from sandeval.base import Result, Status, Vector, errno_name
@@ -89,7 +90,6 @@ class UnixSocketReachVector(Vector):
             except OSError as exc:
                 denied[path] = f"stat: {errno_name(exc)}"
                 continue
-            import stat as stat_mod
             if not stat_mod.S_ISSOCK(st.st_mode):
                 continue
             entry = {"path": path, "origin": origin, "uid": st.st_uid}
@@ -143,18 +143,20 @@ class UnixSocketReachVector(Vector):
 
     @staticmethod
     def _connect_once(path):
+        conn = None
         try:
             conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             conn.settimeout(2)
             conn.connect(path)
-            conn.close()
             return True, "ok"
         except OSError as exc:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001 - socket may have failed earlier
-                pass
             return False, errno_name(exc)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     @staticmethod
     def _dir_writable(directory):

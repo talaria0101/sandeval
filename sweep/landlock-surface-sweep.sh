@@ -603,10 +603,10 @@ int main(int argc,char**argv){
 #endif
   }else if(!strcmp(op,"perfopen")&&argc==3){
 #ifdef SYS_perf_event_open
-    struct{unsigned size,type;unsigned long long config;unsigned long long sample_period;
+    struct{unsigned type,size;unsigned long long config;unsigned long long sample_period;
            unsigned long long sample_type,read_format;unsigned long long flags;
            unsigned wakeup,raw_type;unsigned long long raw_config;unsigned branch,extra;}a;
-    memset(&a,0,sizeof a);a.size=sizeof a;a.type=0;a.config=0;a.flags=1ULL<<5; /* exclude_kernel */
+    memset(&a,0,sizeof a);a.type=0;a.size=sizeof a;a.config=0;a.flags=1ULL<<5; /* exclude_kernel */
     long r=syscall(SYS_perf_event_open,&a,sizeof a,(pid_t)atoi(argv[2]),-1,0);
     if(r>=0)close((int)r);vcls(r,"perf_event_open(pid)");
 #else
@@ -627,8 +627,9 @@ int main(int argc,char**argv){
 #endif
   }else if(!strcmp(op,"bpfcreate")){
 #ifdef SYS_bpf
-    unsigned long long a[15]={0};a[0]=1 /*HASH*/;a[1]=8;a[2]=8;a[3]=1;
-    long r=syscall(SYS_bpf,0,a,sizeof a);vcls(r,"bpf(MAP_CREATE)");
+    unsigned char ab[120];memset(ab,0,sizeof ab);
+    *(unsigned*)(ab)=1 /*HASH*/;*(unsigned*)(ab+4)=8;*(unsigned*)(ab+8)=8;*(unsigned*)(ab+12)=1;
+    long r=syscall(SYS_bpf,0,ab,sizeof ab);vcls(r,"bpf(MAP_CREATE)");
 #else
     rep("INCONCLUSIVE","bpf-undefined-in-headers");
 #endif

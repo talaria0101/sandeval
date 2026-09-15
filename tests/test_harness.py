@@ -277,6 +277,63 @@ class ReportActionTests(unittest.TestCase):
             self.assertIn("IMPROVED", out.stdout)
 
 
+class ImpactLayerTests(unittest.TestCase):
+    """V29-V37: helpers, metadata, and the cleanup guarantees."""
+
+    def test_common_helpers(self):
+        sys.path.insert(0, os.path.join(ROOT, "vectors"))
+        import _common  # noqa: E402
+
+        line = _common.marker_line("V29", "target=x")
+        self.assertTrue(line.startswith("SAND_EVAL_POC V29 "))
+        self.assertTrue(line.endswith("target=x\n"))
+        self.assertEqual(_common.errno_name(1), "EPERM")
+        self.assertEqual(_common.errno_name(0), "ok")
+        self.assertFalse(_common.is_regular_path("socket:[123]"))
+        self.assertFalse(_common.is_regular_path("pipe:[1]"))
+        self.assertTrue(_common.is_regular_path(os.__file__))
+        inv = _common.fd_inventory(os.getpid())
+        self.assertTrue(any(e["fd"] == 0 or e["fd"] == 1 for e in inv))
+        with tempfile.NamedTemporaryFile() as handle:
+            self.assertTrue(_common.writable_by_us(os.fstat(handle.fileno())))
+
+    def test_new_vectors_have_advice_and_metadata(self):
+        sys.path.insert(0, os.path.join(ROOT, "sandeval"))
+        sys.path.insert(0, os.path.join(ROOT, "vectors"))
+        import advice  # noqa: E402
+        from runner import discover_vectors  # noqa: E402
+
+        vectors = {v.id: v for v in discover_vectors(os.path.join(ROOT, "vectors"))}
+        for vid in ("V29", "V30", "V31", "V32", "V33", "V34", "V35", "V36", "V37"):
+            self.assertIn(vid, vectors, vid)
+            self.assertTrue(advice.for_id(vid)["why"], f"advice why missing for {vid}")
+            self.assertTrue(advice.for_id(vid)["fix"], f"advice fix missing for {vid}")
+            self.assertTrue(vectors[vid].description, vid)
+
+    def test_v35_xattr_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            policy = os.path.join(td, "policy.toml")
+            with open(policy, "w") as handle:
+                handle.write("[resources]\n")
+            out = run(
+                "run", "--clean", "--vector", "V35",
+                "--in", td, "--out", td, "--policy", policy, "--state-dir", td,
+            )
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            try:
+                os.getxattr(policy, "user.sandeval.V35")
+                self.fail("xattr marker survived --clean")
+            except OSError:
+                pass
+
+    def test_v30_leaves_no_links(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = run("run", "--clean", "--vector", "V30", "--in", td, "--out", td)
+            self.assertIn(out.returncode, (0, 1), out.stdout + out.stderr)
+            residue = [n for n in os.listdir(td) if n.startswith("ingest-")]
+            self.assertEqual(residue, [])
+
+
 class SafeGateTests(unittest.TestCase):
     """--safe must SKIP host-global vectors (V8 arms a host-side trap)."""
 
