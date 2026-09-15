@@ -6,6 +6,7 @@ netrc, SSH keys, cloud/toolchain credential files — and reports which are
 readable and which look like they carry a token. Values are never copied into
 the report, only paths and key names.
 """
+import json
 import os
 import re
 
@@ -59,6 +60,32 @@ class CredentialReachVector(Vector):
                 with_tokens.append(path)
         detail = {"env_keys": env_keys, "readable": readable, "token_files": with_tokens}
 
+        # The blast radius of the token the agent legitimately holds. errand's
+        # github.ts says to "treat the token as known to the agent, and scope
+        # it on that basis" - this measures the scope. Read-only API call,
+        # scope NAMES only, never the token.
+        scopes, token_login = [], None
+        token = os.environ.get("GH_TOKEN", "")
+        if token:
+            import urllib.request
+
+            req = urllib.request.Request(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    scopes = [s.strip() for s in (resp.headers.get("x-oauth-scopes") or "").split(",") if s.strip()]
+                    who = json.loads(resp.read().decode("utf-8", "replace"))
+                    token_login = who.get("login")
+            except (OSError, ValueError):
+                pass
+        high_blast = [s for s in scopes if s in ("repo", "workflow", "admin:org", "admin:repo_hook",
+                                                "delete_repo", "admin:gpg_key", "admin:ssh_signing_key")]
+        detail["gh_token_scopes"] = scopes
+        detail["gh_token_login"] = token_login
+        detail["gh_token_high_blast_scopes"] = high_blast
+
         # Push the map one step further: which env NAMES point at live IPC or
         # cloud surfaces, and does the workspace git config carry credential
         # helpers or token-bearing remotes? Names and config KEYS only.
@@ -98,11 +125,32 @@ class CredentialReachVector(Vector):
                 "credential files readable and token-shaped: " + ", ".join(with_tokens[:6]),
                 detail,
             )
+        if scopes:
+            blast = f"; high-blast scope(s): {', '.join(high_blast)}" if high_blast else ""
+            who = f" (login {token_login})" if token_login else ""
+            return Result(
+                Status.SUSPECTED,
+                f"GH_TOKEN is live and grants{who}: {', '.join(scopes)}{blast} - "
+                "the agent's whole working credential is exfiltratable over the allowed egress; "
+                f"daemon env also carries: {', '.join(daemon_env_names[:4])}" if daemon_env_names else
+                f"GH_TOKEN is live and grants{who}: {', '.join(scopes)}{blast} - "
+                "the agent's whole working credential is exfiltratable over the allowed egress",
+                detail,
+            )
         if daemon_env_names:
             return Result(
                 Status.SUSPECTED,
                 f"daemon environment carries IPC/credential surfaces: {', '.join(daemon_env_names[:6])} "
                 "(names only; feed these to V34/V20 file checks)",
+                detail,
+            )
+        if scopes:
+            blast = f"; high-blast scope(s): {', '.join(high_blast)}" if high_blast else ""
+            who = f" (login {token_login})" if token_login else ""
+            return Result(
+                Status.SUSPECTED,
+                f"GH_TOKEN is live and grants{who}: {', '.join(scopes)}{blast} - "
+                "the agent's whole working credential is exfiltratable over the allowed egress",
                 detail,
             )
         if readable:
