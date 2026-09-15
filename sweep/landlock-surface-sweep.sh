@@ -542,6 +542,149 @@ int main(int argc,char**argv){
     if(WIFSIGNALED(st)&&WTERMSIG(st)==SIGKILL)printf("DENY memhog-SIGKILLED-at-~%dMB(memory.max)\n",sh[0]);
     else if(WIFEXITED(st))printf("ALLOW allocated-%dMB-uncapped\n",sh[0]);
     else printf("DENY memhog-other\n");
+  }else if(!strcmp(op,"opentree")&&argc==3){ /* new mount API: Landlock has no hook; denylist must name it */
+#ifdef SYS_open_tree
+    int f=open(argv[2],O_PATH|O_CLOEXEC);if(f<0){vcls(f,"open-target");return 0;}close(f);
+    long r=syscall(SYS_open_tree,AT_FDCWD,argv[2],O_PATH|OPEN_TREE_CLONE);
+    if(r>=0)close((int)r);vcls(r,"open_tree(OPEN_TREE_CLONE)");
+#else
+    rep("INCONCLUSIVE","open_tree-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"movemount")&&argc==4){ /* re-root argv[2] at argv[3]; CAP_SYS_ADMIN over owning userns */
+#ifdef SYS_open_tree
+    int f=(int)syscall(SYS_open_tree,AT_FDCWD,argv[2],O_PATH|OPEN_TREE_CLONE);
+    if(f<0){vcls(f,"open_tree");return 0;}
+#ifdef SYS_move_mount
+    long r=syscall(SYS_move_mount,f,"",AT_FDCWD,argv[3],MOVE_MOUNT_F_EMPTY_PATH,0);
+    close(f);vcls(r,"move_mount");
+#else
+    close(f);rep("INCONCLUSIVE","move_mount-undefined-in-headers");
+#endif
+#else
+    rep("INCONCLUSIVE","open_tree-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"fsopen")){
+#ifdef SYS_fsopen
+    long r=syscall(SYS_fsopen,"tmpfs",FSOPEN_CLOEXEC);if(r>=0)close((int)r);vcls(r,"fsopen(tmpfs)");
+#else
+    rep("INCONCLUSIVE","fsopen-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"mountsetattr")){
+#ifdef SYS_mount_setattr
+    long r=syscall(SYS_mount_setattr,-1,"",AT_EMPTY_PATH,NULL,0);vcls(r,"mount_setattr(null)");
+#else
+    rep("INCONCLUSIVE","mount_setattr-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"pvreadv")&&argc==3){ /* process_vm_readv of pid argv[2]; the ptrace denylist must name it */
+#ifdef SYS_process_vm_readv
+    struct iovec l; l.iov_base=malloc(16); l.iov_len=16;
+    struct iovec rm; rm.iov_base=NULL; rm.iov_len=16;
+    long rv=syscall(SYS_process_vm_readv,(pid_t)atoi(argv[2]),&l,1,&rm,1,0);
+    vcls(rv,"process_vm_readv(pid)");
+#else
+    rep("INCONCLUSIVE","process_vm_readv-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"pidfdsig")&&argc==3){ /* pidfd_send_signal sig 0: permission probe, no signal */
+#ifdef SYS_pidfd_send_signal
+    int pd=(int)syscall(SYS_pidfd_open,(pid_t)atoi(argv[2]),0);
+    if(pd<0){vcls(pd,"pidfd_open");return 0;}
+    long r=syscall(SYS_pidfd_send_signal,pd,0,NULL,0);close(pd);vcls(r,"pidfd_send_signal(sig0)");
+#else
+    rep("INCONCLUSIVE","pidfd_send_signal-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"pidfdgetfd")&&argc==4){
+#ifdef SYS_pidfd_getfd
+    int pd=(int)syscall(SYS_pidfd_open,(pid_t)atoi(argv[2]),0);
+    if(pd<0){vcls(pd,"pidfd_open");return 0;}
+    long r=syscall(SYS_pidfd_getfd,pd,atoi(argv[3]),0);close(pd);if(r>=0)close((int)r);
+    vcls(r,"pidfd_getfd");
+#else
+    rep("INCONCLUSIVE","pidfd_getfd-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"perfopen")&&argc==3){
+#ifdef SYS_perf_event_open
+    struct{unsigned size,type;unsigned long long config;unsigned long long sample_period;
+           unsigned long long sample_type,read_format;unsigned long long flags;
+           unsigned wakeup,raw_type;unsigned long long raw_config;unsigned branch,extra;}a;
+    memset(&a,0,sizeof a);a.size=sizeof a;a.type=0;a.config=0;a.flags=1ULL<<5; /* exclude_kernel */
+    long r=syscall(SYS_perf_event_open,&a,sizeof a,(pid_t)atoi(argv[2]),-1,0);
+    if(r>=0)close((int)r);vcls(r,"perf_event_open(pid)");
+#else
+    rep("INCONCLUSIVE","perf_event_open-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"keyadd")){
+#ifdef SYS_add_key
+    long r=syscall(SYS_add_key,"user","sandeval.sweep","payload",7,-3 /* thread keyring */);
+    vcls(r,"add_key");
+#else
+    rep("INCONCLUSIVE","add_key-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"uffd")){
+#ifdef SYS_userfaultfd
+    long r=syscall(SYS_userfaultfd,O_CLOEXEC|O_NONBLOCK);if(r>=0)close((int)r);vcls(r,"userfaultfd");
+#else
+    rep("INCONCLUSIVE","userfaultfd-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"bpfcreate")){
+#ifdef SYS_bpf
+    unsigned long long a[15]={0};a[0]=1 /*HASH*/;a[1]=8;a[2]=8;a[3]=1;
+    long r=syscall(SYS_bpf,0,a,sizeof a);vcls(r,"bpf(MAP_CREATE)");
+#else
+    rep("INCONCLUSIVE","bpf-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"kcmp")&&argc==4){
+#ifdef SYS_kcmp
+    long r=syscall(SYS_kcmp,(pid_t)atoi(argv[2]),(pid_t)atoi(argv[3]),0 /*KCMP_FILE*/,0,0);
+    vcls(r,"kcmp");
+#else
+    rep("INCONCLUSIVE","kcmp-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"mqopen")){
+#ifdef SYS_mq_open
+    long r=syscall(SYS_mq_open,"/sandeval-sweep",0 /*O_RDONLY*/);if(r>=0)close((int)r);
+    vcls(r,"mq_open");
+#else
+    rep("INCONCLUSIVE","mq_open-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"fanotify")){
+#ifdef SYS_fanotify_init
+    long r=syscall(SYS_fanotify_init,0,0);if(r>=0)close((int)r);vcls(r,"fanotify_init");
+#else
+    rep("INCONCLUSIVE","fanotify_init-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"quotactl")){
+#ifdef SYS_quotactl
+    long r=syscall(SYS_quotactl,0x0600 /*Q_SYNC*/,NULL,0,0);vcls(r,"quotactl(Q_SYNC)");
+#else
+    rep("INCONCLUSIVE","quotactl-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"clockset")){ /* host-global if allowed; value-preserving write-back */
+#ifdef SYS_clock_settime
+    struct timespec ts;if(clock_gettime(CLOCK_REALTIME,&ts))vcls(-1,"clock_gettime");
+    else{long r=syscall(SYS_clock_settime,CLOCK_REALTIME,&ts);vcls(r,"clock_settime(current)");}
+#else
+    rep("INCONCLUSIVE","clock_settime-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"mlockall")){
+    long r=syscall(SYS_mlockall,1 /*MLOCK_CURRENT*/);vcls(r,"mlockall(current)");
+  }else if(!strcmp(op,"vhangup")){
+#ifdef SYS_vhangup
+    long r=syscall(SYS_vhangup);vcls(r,"vhangup");
+#else
+    rep("INCONCLUSIVE","vhangup-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"acct")){
+#ifdef SYS_acct
+    long r=syscall(SYS_acct,NULL);vcls(r,"acct(NULL=disable)");
+#else
+    rep("INCONCLUSIVE","acct-undefined-in-headers");
+#endif
+  }else if(!strcmp(op,"lookupdcookie")){
+#ifdef SYS_lookup_dcookie
+    long r=syscall(SYS_lookup_dcookie,0,NULL,0);vcls(r,"lookup_dcookie");
+#else
+    rep("INCONCLUSIVE","lookup_dcookie-undefined-in-headers");
+#endif
   }else{rep("INCONCLUSIVE","unknown-op");}
   return 0;
 }
@@ -656,6 +799,39 @@ if [ -x "$HELPER" ]; then
   done < "$tl"
 else
   rec ioctl-scan info skip "helper-unavailable(no cc)"
+fi
+
+# ===================== 3c. MODERN SYSCALL SURFACE ======================
+# Denylists age: each new kernel interface is a new syscall number that a
+# classic denylist does not name. Every probe here is permission-only or
+# value-preserving, and each becomes its own baseline entry.
+sec "3c. modern syscall surface (new numbers a classic denylist misses)"
+if [ -x "$HELPER" ]; then
+  mkdir -p "$SCRATCH/mm-src" "$SCRATCH/mm-dest"
+  hcheck helper-opentree      deny opentree "$SCRATCH/mm-src"
+  hcheck helper-movemount     deny movemount "$SCRATCH/mm-src" "$SCRATCH/mm-dest"
+  hcheck helper-fsopen        deny fsopen
+  hcheck helper-mountsetattr  deny mountsetattr
+  hcheck helper-pvreadv       deny pvreadv 1
+  hcheck helper-pidfdsig      deny pidfdsig 1
+  hcheck helper-pidfdgetfd    deny pidfdgetfd 1 0
+  hcheck helper-perfopen      deny perfopen 1
+  hcheck helper-keyadd        deny keyadd
+  hcheck helper-uffd          deny uffd
+  hcheck helper-bpfcreate     deny bpfcreate
+  hcheck helper-kcmp          deny kcmp 1 $$
+  hcheck helper-mqopen        deny mqopen
+  hcheck helper-fanotify      deny fanotify
+  hcheck helper-quotactl      deny quotactl
+  if [ "$SAFE" = 0 ]; then
+    hcheck helper-clockset    deny clockset
+  else rec helper-clockset info skip "gated(--safe)"; fi
+  hcheck helper-mlockall      deny mlockall
+  hcheck helper-vhangup       deny vhangup
+  hcheck helper-acct          deny acct
+  hcheck helper-lookupdcookie deny lookupdcookie
+else
+  rec helper-surface info skip "helper-unavailable(no cc)"
 fi
 
 # ===================== 4. MOUNT / NAMESPACE ===========================
