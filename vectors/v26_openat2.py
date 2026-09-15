@@ -9,6 +9,7 @@ openat2 path to succeed where openat was denied; every other combination is
 an honest PASS or SKIP.
 """
 import ctypes
+import errno
 import os
 import struct
 
@@ -70,7 +71,7 @@ class Openat2Vector(Vector):
                     {"target": target, "direct_errno": direct_err},
                 )
             except OSError as exc:
-                if exc.errno == os.errno.EBADF:
+                if exc.errno == errno.EBADF:
                     return Result(
                         Status.SKIP,
                         "openat2 returned an fd but write() got EBADF; flags were "

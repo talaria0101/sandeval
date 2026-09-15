@@ -28,6 +28,7 @@ except ImportError:
 try:
     from _common import (
         MARKER,
+        errno_name as errno_name_raw,
         fd_inventory,
         is_regular_path,
         libc,
@@ -38,6 +39,7 @@ try:
 except ImportError:
     from _common import (  # type: ignore
         MARKER,
+        errno_name as errno_name_raw,
         fd_inventory,
         is_regular_path,
         libc,
@@ -183,12 +185,12 @@ class ForeignFdWriteVector(Vector):
         """pidfd_open+pidfd_getfd; returns the dup or None (sets _dup_err)."""
         pd, err = raw_syscall(SYS_PIDFD_OPEN, pid, 0)
         if pd < 0:
-            self._dup_err = errno_name(err)
+            self._dup_err = errno_name_raw(err)
             return None
         dup, err = raw_syscall(SYS_PIDFD_GETFD, pd, fd, 0)
         os.close(pd)
         if dup < 0:
-            self._dup_err = errno_name(err)
+            self._dup_err = errno_name_raw(err)
             return None
         self._dup_err = "ok"
         return dup

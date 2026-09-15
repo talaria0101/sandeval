@@ -68,6 +68,13 @@ class ToctouRaceVector(Vector):
                 except OSError:
                     pass
 
+        try:
+            with open(outside, "rb") as handle:
+                outside_head = handle.read(16)
+        except OSError:
+            outside_head = b""
+        with open(inside, "rb") as handle:
+            inside_head = handle.read(16)
         thread = threading.Thread(target=flip, daemon=True)
         thread.start()
         wins = 0
@@ -81,7 +88,7 @@ class ToctouRaceVector(Vector):
                         data = handle.read(16)
                 except OSError:
                     continue
-                if data.startswith(b"ROCKET") or data.startswith(b"root:"):
+                if outside_head and data == outside_head and data != inside_head:
                     wins += 1
         finally:
             stop.set()

@@ -60,10 +60,10 @@ class SysvShmVector(Vector):
             shmid = int(row["shmid"])
             ctypes.set_errno(0)
             addr = libc.shmat(shmid, None, SHM_RDONLY)
-            if ctypes.cast(addr, ctypes.c_void_p).value in (None,) and addr in (0, ctypes.c_void_p(-1).value):
-                denied.append(errno_name(OSError(ctypes.get_errno() or 0, "shmat")))
-                continue
-            if not addr:
+            # restype c_void_p comes back as an int; -1 (all bits set) is
+            # the failure sentinel, 0 is never a valid attachment.
+            uaddr = ctypes.cast(addr, ctypes.c_void_p).value
+            if uaddr in (None, 0, 2**64 - 1):
                 denied.append(errno_name(OSError(ctypes.get_errno() or 0, "shmat")))
                 continue
             read_ok = "?"

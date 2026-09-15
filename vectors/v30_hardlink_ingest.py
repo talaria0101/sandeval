@@ -151,7 +151,8 @@ class HardlinkIngestVector(Vector):
                 detail,
             )
         if readable:
-            shown = "; ".join(l["src"] for l in linked if isinstance(l.get("read_bytes"), int))[:3]
+            shown_srcs = [l["src"] for l in linked if isinstance(l.get("read_bytes"), int)][:3]
+            shown = "; ".join(shown_srcs)
             return Result(
                 Status.FAIL,
                 f"out-of-policy content read through a workspace hardlink (confidentiality): {shown}",

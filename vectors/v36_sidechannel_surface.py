@@ -37,8 +37,8 @@ except ImportError:
 NUMBERS = {
     "x86_64": {"perf_event_open": 298, "userfaultfd": 323, "bpf": 321,
                "add_key": 248, "request_key": 249, "keyctl": 250},
-    "aarch64": {"perf_event_open": 241, "userfaultfd": 282, "bpf": 386,
-                "add_key": 279, "request_key": 280, "keyctl": 270},
+    "aarch64": {"perf_event_open": 241, "userfaultfd": 282, "bpf": 280,
+                "add_key": 217, "request_key": 218, "keyctl": 219},
 }
 KEYCTL_READ = 11
 
@@ -114,22 +114,25 @@ class SidechannelSurfaceVector(Vector):
         Self-measurement is the baseline; pid 1 is the cross-boundary case.
         Returns errno names, or `fd <n>` on success (fd is closed).
         """
-        # struct perf_event_attr: .size at offset 8, type=0 (HARDWARE),
-        # config=0 (CPU cycles), disabled=1, exclude_kernel=1.
+        # struct perf_event_attr: type u32 @0, size u32 @4, config u64 @8.
+        # type=0 (HARDWARE), config=0 (CPU cycles), disabled=1,
+        # exclude_kernel=1 (bit 5 of the flags word @40).
         attr = ctypes.create_string_buffer(120)
         ctypes.memset(attr, 0, 120)
-        attr[8:12] = (120).to_bytes(4, "little")
-        attr[12:16] = (0).to_bytes(4, "little")  # type = HARDWARE
-        attr[16:24] = (0).to_bytes(8, "little")  # config = CPU cycles
+        attr[0:4] = (0).to_bytes(4, "little")  # type = HARDWARE
+        attr[4:8] = (120).to_bytes(4, "little")  # size
+        attr[8:16] = (0).to_bytes(8, "little")  # config = CPU cycles
         attr[40:48] = (1 | (1 << 5)).to_bytes(8, "little")  # disabled | exclude_kernel(1<<5)
 
         def open_one(pid):
+            # perf_event_open(attr, pid, cpu, group_fd, flags)
             fd, err = raw_syscall(
                 nums["perf_event_open"],
                 ctypes.cast(attr, ctypes.c_void_p),
-                len(attr),
                 pid,
-                0,  # cpu = -1 would be all cpus; 0 pins to cpu 0, valid for self
+                -1,  # cpu = -1: all cpus (0 would pin to cpu 0 and skew self vs pid1)
+                -1,  # no group
+                0,
             )
             if fd < 0:
                 return errno_name(OSError(err, "perf_event_open"))
