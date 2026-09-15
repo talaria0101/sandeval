@@ -55,7 +55,7 @@ class SysvShmVector(Vector):
         libc.shmat.restype = ctypes.c_void_p
         libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
 
-        attached, denied = [], []
+        attached, denied, rw_attached = [], [], []
         for row in foreign[:5]:
             shmid = int(row["shmid"])
             ctypes.set_errno(0)
@@ -77,14 +77,29 @@ class SysvShmVector(Vector):
                 f"shmid {shmid} (uid {row['uid']}, {row['size']}B, nattch {row['nattch']}): "
                 f"attached read-only, read {read_ok}"
             )
+            # The stronger half of the primitive: attach read-write. Verified
+            # by attach success alone - no byte is written to foreign memory.
+            ctypes.set_errno(0)
+            addr_rw = libc.shmat(shmid, None, 0)
+            if addr_rw and addr_rw != ctypes.c_void_p(-1).value:
+                libc.shmdt(ctypes.c_void_p(addr_rw))
+                rw_attached.append(shmid)
 
         detail = {
             "segments_visible": len(rows),
             "foreign": [r["shmid"] for r in foreign],
             "attached": attached,
+            "rw_attached": rw_attached,
             "denied": denied,
             "euid": euid,
         }
+        if rw_attached:
+            return Result(
+                Status.FAIL,
+                "shmat attached to host shared memory READ-WRITE (no byte written, but the "
+                "write primitive is proven): segments " + ", ".join(map(str, rw_attached[:3])),
+                detail,
+            )
         if attached:
             return Result(
                 Status.FAIL,

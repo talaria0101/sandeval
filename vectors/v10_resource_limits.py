@@ -34,6 +34,14 @@ def _read(path):
         return None
 
 
+def _df_free(path):
+    try:
+        usage = os.statvfs(path)
+        return usage.f_bavail * usage.f_frsize
+    except OSError:
+        return None
+
+
 class ResourceLimitsVector(Vector):
     id = "V10"
     title = "cgroup and rlimit bounds (memory / pids / file size)"
@@ -47,11 +55,31 @@ class ResourceLimitsVector(Vector):
         memory = _read(os.path.join(cg, "memory.max")) or _read("/sys/fs/cgroup/memory/memory.limit_in_bytes")
         pids = _read(os.path.join(cg, "pids.max")) or _read("/sys/fs/cgroup/pids/pids.max")
         io_max = _read(os.path.join(cg, "io.max"))
+        swap = _read(os.path.join(cg, "memory.swap.max"))
         try:
             fsize = resource.getrlimit(resource.RLIMIT_FSIZE)
         except (ValueError, OSError):
             fsize = None
-        observed = {"cgroup": cg, "memory.max": memory, "pids.max": pids, "io.max": io_max, "RLIMIT_FSIZE": fsize}
+        try:
+            memlock = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        except (ValueError, OSError):
+            memlock = None
+        try:
+            nproc = resource.getrlimit(resource.RLIMIT_NPROC)
+        except (ValueError, OSError):
+            nproc = None
+        free_b = _df_free(ctx.workspace)
+        observed = {
+            "cgroup": cg,
+            "memory.max": memory,
+            "memory.swap.max": swap,
+            "pids.max": pids,
+            "io.max": io_max,
+            "RLIMIT_FSIZE": fsize,
+            "RLIMIT_MEMLOCK": memlock,
+            "RLIMIT_NPROC": nproc,
+            "workspace_free_bytes": free_b,
+        }
         unbounded = []
         if memory in (None, "max"):
             unbounded.append("memory")
@@ -59,13 +87,23 @@ class ResourceLimitsVector(Vector):
             unbounded.append("pids")
         if fsize in (None, (resource.RLIM_INFINITY, resource.RLIM_INFINITY)):
             unbounded.append("file-size")
+        if memlock in (None, (resource.RLIM_INFINITY, resource.RLIM_INFINITY)):
+            unbounded.append("memlock")
+        if nproc in (None, (resource.RLIM_INFINITY, resource.RLIM_INFINITY)):
+            unbounded.append("nproc")
+        head = f"{free_b // (1024 * 1024)}MiB fillable in the workspace" if free_b else ""
+        tail = f"; {head}" if head else ""
         if unbounded:
             return Result(
                 Status.FAIL,
-                "unbounded: " + ", ".join(unbounded) + f" (cgroup {cg})",
+                "unbounded: " + ", ".join(unbounded) + f" (cgroup {cg}){tail}",
                 observed,
             )
-        return Result(Status.PASS, f"limits present (memory={memory}, pids={pids})", observed)
+        return Result(
+            Status.PASS,
+            f"limits present (memory={memory}, pids={pids}, memlock={memlock}, nproc={nproc}){tail}",
+            observed,
+        )
 
 
 VECTOR = ResourceLimitsVector()

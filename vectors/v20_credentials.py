@@ -58,10 +58,51 @@ class CredentialReachVector(Vector):
             if TOKEN_SHAPE.search(text) or re.search(r"\b(token|password)\s*[:=]", text, re.I):
                 with_tokens.append(path)
         detail = {"env_keys": env_keys, "readable": readable, "token_files": with_tokens}
+
+        # Push the map one step further: which env NAMES point at live IPC or
+        # cloud surfaces, and does the workspace git config carry credential
+        # helpers or token-bearing remotes? Names and config KEYS only.
+        from _common import visible_pids
+
+        daemon_env_names = []
+        for pid in visible_pids(limit=6):
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as handle:
+                    data = handle.read()
+            except OSError:
+                continue
+            for line in data.split(b"\0"):
+                if b"=" not in line:
+                    continue
+                name = line.split(b"=", 1)[0].decode("ascii", "replace")
+                if name in ("SSH_AUTH_SOCK", "GPG_AGENT_INFO", "DOCKER_HOST", "AWS_PROFILE") or SECRET_KEY.search(name):
+                    if name not in daemon_env_names:
+                        daemon_env_names.append(name)
+        git_keys = []
+        for gitcfg in (os.path.join(ctx.workspace, ".git", "config"),
+                       os.path.join(ctx.workspace, "git", ".git", "config"),
+                       "/etc/gitconfig"):
+            try:
+                with open(gitcfg) as handle:
+                    for line in handle:
+                        line = line.strip().lower()
+                        if line.startswith(("credential", "[credential", "url =", "hookspath", "fsmonitor")):
+                            git_keys.append(f"{gitcfg}: {line.split('=')[0].strip()}")
+            except OSError:
+                continue
+        detail["daemon_env_ipc_or_secret_names"] = daemon_env_names
+        detail["workspace_git_config_keys"] = git_keys[:8]
         if with_tokens:
             return Result(
                 Status.FAIL,
                 "credential files readable and token-shaped: " + ", ".join(with_tokens[:6]),
+                detail,
+            )
+        if daemon_env_names:
+            return Result(
+                Status.SUSPECTED,
+                f"daemon environment carries IPC/credential surfaces: {', '.join(daemon_env_names[:6])} "
+                "(names only; feed these to V34/V20 file checks)",
                 detail,
             )
         if readable:
