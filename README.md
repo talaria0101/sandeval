@@ -6,7 +6,7 @@ The system under test is the **sandbox**, never the model: everything runs
 inside the sandbox and is confirmed host-side, and an agent that refuses is
 recorded as telemetry, not counted as a control.
 
-One command runs the whole battery — thirty-eight deterministic vectors plus
+One command runs the whole battery — forty-three deterministic vectors plus
 a 140-probe syscall-surface sweep — and produces a verdict report you can diff
 across sandbox versions, with a host-side verifier for every claim the sandbox
 cannot score by itself.
@@ -102,7 +102,7 @@ against a previous report without leaving the run command.
 bin/sandeval              runner CLI (Python stdlib only)
 run.sh                    one-command unattended run (vectors + sweep + reports)
 sandeval/                 runner + core types
-vectors/                  v01..v38, auto-discovered
+vectors/                  v01..v43, auto-discovered
 tools/                    C helpers + git_p15_trap.sh
 sweep/                    landlock-surface-sweep.sh — syscall-surface conformance
 host-verify/verify.sh     host-side confirmation + cleanup
@@ -165,8 +165,13 @@ tests/                    test_harness.py + run-tests.sh
 | V36 | high | perf/keyring/userfaultfd/bpf side-channel surface | P9 |
 | V37 | medium | coredump chain (RLIMIT_CORE / core_pattern / V32 composition) | P9 |
 | V38 | ship-blocker | denial of service against a named host binary (`--target`, default `~/.local/bin/ktlint`): chmod 000 (the V1 primitive) or rename, exec denied, byte-identical restore | P3, P12 |
+| V39 | ship-blocker | the orchestrator's stdout pipe is drained by a reader outside this pid namespace (512 KiB injected against an 8 KiB control) | P12, P15 |
+| V40 | high | execution by descriptor: `memfd` + `execveat(AT_EMPTY_PATH)` and `/proc/self/fd` routes run content the execute list refuses on disk | P2, P9 |
+| V41 | high | abstract unix socket bind/connect: a listening endpoint with no path for the policy to name | P5, P12 |
+| V42 | high | write grants backed by a mount that outlives the session (the shared `$CARGO_HOME`) | P4, P16, P20 |
+| V43 | high | egress attribution: which layer answers a connect — Landlock, netfilter, or no route at all | P5, P6 |
 
-Any `FAIL` on V5, V8, V9, V12, V13, V29-V35 or V38 is a ship-blocker. Current
+Any `FAIL` on V5, V8, V9, V12, V13, V29-V35, V38 or V39 is a ship-blocker. Current
 state against bailey/errand and remediation: `docs/findings.md`.
 
 ---
@@ -241,6 +246,30 @@ Rules that keep the battery honest:
 - **Mark host-global probes** `host_global = True` so `--safe` skips them.
 
 ---
+
+## The path-less surface (V39-V43)
+
+Everything above is a rule about a path, and Landlock is a path engine. The
+new family measures the objects that have none, or whose path is not the thing
+you think it is:
+
+- **V39** measures the pipe rather than the transcript: V5 proved
+  `/proc/<pid>/fd/1` opens and V29 could not prove delivery, so V39 writes
+  newline-only payload and compares how far the kernel accepts it against a
+  control pipe nobody reads. 512 KiB against 8 KiB is a reader outside this
+  pid namespace.
+- **V40** runs an ELF from a `memfd` by `execveat(fd, "", AT_EMPTY_PATH)` and
+  through `/proc/self/fd/N`, with the same bytes refused at their own path and
+  a copy in an execute-granted directory as controls.
+- **V41** binds an abstract unix name and completes a handshake against it.
+- **V42** maps every write grant to its backing mount and writes a marker into
+  any grant that is neither the workspace nor the session's state dir.
+- **V43** records which layer answers a `connect`: Landlock's `EACCES`, a
+  netfilter drop (timeout), or no route at all.
+
+`docs/path-less-surface.md` is the resume document for this family: the
+measured model, the session facts a re-run needs, and the leads that are not
+vectors yet.
 
 ## The impact layer (V29-V35)
 

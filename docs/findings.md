@@ -620,3 +620,188 @@ Live artifacts from this pass (both scored `CONFIRMED` by
   the finding does not need them to be proven.
 - The rename-deny fallback is only tried when the target's parent directory
   is writable; on this build the chmod primitive is what lands.
+
+---
+
+## v10 pass (2026-09-29, errand v0.2.3 sandbox): the path-less surface
+
+Five vectors, V39-V43, plus re-runs of V5, V7 and V37. Source read at errand
+`24a8a9f` (v0.2.3, 2026-09-29) and bailey `71473e5` (v0.2.2, 2026-09-21); the
+deployed daemon's own build is not readable from inside. The standing resume
+document for this family, including the leads that are not vectors yet, is
+`docs/path-less-surface.md`.
+
+Command: `./bin/sandeval run --arm --vector V5,V7,V37,V39,V40,V41,V42,V43`.
+V39, V40 and V43 were run three times with identical verdicts and figures.
+
+### V39 — the orchestrator's stdout pipe is drained by a reader we cannot see (FAIL, ship-blocker)
+
+**What.** `/proc/1/fd/1` opens `O_WRONLY` and takes 512 KiB of newline bytes
+inside 2 s, against a control pipe nobody reads that stalls at 8192 bytes
+(65536 in another process on the same host; `F_GETPIPE_SZ` is not constant
+here). The only holder of the read end is pid 1's own fd 1, and no process in
+this pid namespace can read it.
+
+**Why.** Landlock mediates `/proc` writes where the path resolves to a file:
+`/proc/self/oom_score_adj` is `EACCES`. `/proc/<pid>/fd/<n>` is a magic
+symlink that resolves to the object itself, a pipe, and a pipe has no path in
+the policy's tree, so the write list - which does not name `/proc` at all -
+is never consulted.
+
+**Impact.** This is a write channel into the host orchestrator, and
+`errand/src/agent/client.rs` shows what each descriptor buys:
+
+- fd 0, stdin: lines are dispatched as commands. An earlier pass measured a
+  `{"type":"bash","command":"..."}` line executing with `ppid=1`.
+- fd 1, stdout: `dispatch()` at `client.rs:708` skips blank lines, parses the
+  rest as JSONL and takes `message_end` at `:895`, which reaches
+  `session.rs:1217 say()` - a post to the operator's thread as the agent.
+  `auto_retry_start` at `:967` reaches `session.rs:920` and mutates the host
+  scheduler's rate-limit state. A line longer than the 8 MiB framer ceiling
+  (`client.rs:273`, `framing.rs:72`) reaches `on_protocol_violation` at
+  `:665` and ends the session (`session.rs:950`).
+- fd 2, stderr: `client.rs:678-694` stores it as `state.last_words`, the death
+  report the operator reads.
+
+**Fix.** Keep the orchestrator out of the sandbox's `/proc` (a pid namespace
+in which it is not visible, or `/proc` mounted `hidepid=2` with only the
+agent's tree), or give it stdio that is not a pipe reachable by inode: a
+socketpair the child holds one end of, with the other end never visible under
+`/proc`. A Landlock path rule cannot express this one.
+
+**Method note.** The first run of this vector reported a false PASS: the fill
+loop gave up on the first `EAGAIN`, which a busy reader also produces. It now
+retries through 1 s of stalled writes before concluding that nothing is
+reading. Any probe that writes into a pipe needs that shape.
+
+### V40 — code runs from a memfd while the execute list refuses the same bytes on disk (FAIL, high)
+
+**What.** A copy of `/bin/sh` with argv `sh -c 'exit 42'` executed from a
+`memfd` by `execveat(fd, "", AT_EMPTY_PATH)` and again through
+`/proc/self/fd/N`, both exiting 42. The same bytes written to
+`/state/.sandeval-v40.bin` are refused `EACCES` by path `execve`, and their
+`/proc/self/fd/N` alias is refused too; the identical file copied into
+`/workspace` (execute-granted) runs and exits 42.
+
+**Why.** Landlock's exec hook resolves a path. A `memfd` has none, and its
+`/proc` alias resolves to the memfd rather than to a tree the rules can name.
+A regular file's `/proc` alias still resolves to the file, so it is denied -
+which is why routes C and D fail while A and B succeed.
+
+**Impact.** The execute list governs where files are, not what runs. Content
+at a read-granted, execute-denied path - the shared cargo cache, a toolchain -
+can be copied into memory and executed, which is precisely the control that
+stops a replaced binary from being run. The process that results keeps every
+other restriction: this defeats the execute list, not the sandbox.
+
+**Fix.** Deny the path-less routes at the syscall layer: seccomp rules for
+`memfd_create`, for `execveat` with `AT_EMPTY_PATH`, and for `execve` whose
+path is under `/proc/*/fd`. There is no Landlock rule that can express any of
+the three.
+
+**Also recorded.** The kernel refuses `#!` scripts with `AT_EMPTY_PATH` and
+returns `ENOEXEC` before any security hook runs, so a script payload would
+read as a denial that never happened. The payload is an ELF for that reason.
+
+### V41 — an abstract unix socket binds and accepts (FAIL, high)
+
+**What.** `bind("\0sandeval-v41-...")` succeeds for `SOCK_STREAM` and
+`SOCK_DGRAM`, and a stream handshake completes against the name.
+`/proc/net/unix` shows no other abstract endpoints visible from here.
+
+**Why.** The policy declares no socket rule at all (no `unix`, `bind` or
+`abstract` token in `/state/policy.toml`). bailey does ask for
+`Scope::from_all` (`enforce.rs:647-650`, comment: "Abstract UNIX sockets live
+outside the filesystem, so no path rule can reach them... Scoping is the only
+rule that covers either. Older kernels drop it best-effort"), and
+`bailey/docs/guide/network.md:138-143` says that on older kernels the request
+is dropped along with the protection. So this is either a kernel that dropped
+the scope, or a scope rule that does not hold.
+
+**Impact.** A listening endpoint with no path, inside the session's network
+namespace: nothing in the filesystem rules can name it, so any process
+sharing that namespace can connect. In landlock-only mode there is no network
+namespace to isolate the abstract namespace either.
+
+**Fix.** Confirm the Landlock ABI is at least 6 (V25 records it, or bailey's
+`report` subcommand on the host) and that the scope rule is not being dropped;
+otherwise isolate the network namespace, which also isolates the abstract
+namespace.
+
+### V42 — a write grant that outlives the session (FAIL, high)
+
+**What.** Every write grant mapped to its mount: `/workspace` and `/state`
+both sit on mounts whose root carries the session id; `$CARGO_HOME`
+(`/home/qaidvoid/.cache/errand/cargo`) sits on `zfs rpool/home/cache` with
+mount root `/errand/cargo` and no session id. A marker written there lands on
+a tree other sessions and the host share - the previous session's
+`HELLO.txt` and `HELLO_FROM_BUILD.txt` were still in it when this pass ran.
+
+**Why.** The policy grants it explicitly: `write = [..., "/home/qaidvoid/.cache/errand/cargo"]`.
+It is not a bypass, it is a scope error - the grant is correct in kind and
+wider than it looks in the file.
+
+**Impact.** Cross-session persistence and cross-session code execution: a
+prior pass already recorded `TAMPERED_CODE_EXECUTED` when crate source in this
+cache was altered and the next `cargo build` ran it. This moves V18 from
+`suspected` to confirmed with mount evidence.
+
+**Fix.** Point `CARGO_HOME` at a session-scoped path under the state dir, or
+mount the shared cache read-only and layer a writable session-scoped registry
+on top.
+
+### V43 — egress attribution: no direct path (PASS, high)
+
+**What.** `169.254.169.1:36821` (the configured proxy) connects. `1.1.1.1:443`
+and `1.1.1.1:80` pass the syscall layer and time out. `1.1.1.1:22`, `:8080`
+and `:54321` are refused `EACCES` before any packet leaves. Loopback on an
+allowed port (`127.0.0.1:80`, `:443`) times out rather than being refused,
+which is the `ip daddr 127.0.0.0/8 drop` rule. UDP `connect` to any port
+succeeds. TCP `bind` on an ephemeral port and on 54321 are both `EACCES`.
+
+**Why, layer by layer.** The `EACCES` is Landlock, not seccomp: UDP to the
+same address and port is unaffected, and Landlock's net rule is TCP-only
+(`enforce.rs:629-679`). The allowlist is the policy's `egress_allow`
+(`80, 443, 8443`) plus the broker port, which is added at launch
+(`cli.rs:447-459 permit_broker_port`). What then bounds the connection is
+nftables, not Landlock: `cli.rs:472-493` installs a default-drop output chain
+that admits only the broker and established return traffic. `BindTcp` is
+handled with an empty rule list because the policy has no `bind_ports`
+(`enforce.rs:594`), so every listener is denied.
+
+**Impact.** Egress is closed as declared, and the vector now records *which*
+layer answered, so a regression shows up as a change of layer rather than as
+a silent retest. Two of bailey's own documented limitations are confirmed:
+host and CIDR fields in `egress_allow` are advisory because Landlock matches
+TCP port only, and UDP is unfiltered (`network.md:147-150`).
+
+**Which namespace the nftables rule lives in is not decidable from inside** -
+the source says exactly that (`cli.rs:461-469`, note on issue #24). Visible
+from here: `/proc/net/dev` shows `wlp13s0` with host-scale traffic counters,
+local addresses `10.0.2.15` and `127.0.0.1`, and `169.254.169.1` is not local.
+Host-side `nft list ruleset` would settle it.
+
+### Re-runs and corrections to earlier records
+
+- **V5** still FAIL: `/proc/1/fd/0`, `fd/1` and `fd/2` all open `O_WRONLY`.
+  Under `--arm` it wrote `SANDEVAL_POC_V5` into each of pid 1's stdio
+  descriptors; that line is what a stray marker in the orchestrator's log or
+  thread would be from.
+- **V7** PASS and **V37** PASS, unchanged.
+- **V37's bind note is contradicted.** `docs/findings.md` recorded "TCP bind
+  SUCCEEDED at `0.0.0.0:54321`"; today both an ephemeral bind and that exact
+  port return `EACCES`. Either the policy gained a `[network]` section since
+  (which switches `handle_bind` on at `enforce.rs:594`) or the old note came
+  from a different profile. Not settled; re-run with the older policy to tell
+  them apart.
+- **`docs/gap-analysis.md` section 4 was wrong about egress.** It says "every
+  TCP connect denied at the seccomp/connect level, both families". Today TCP
+  connect to an allowlisted port succeeds at the syscall layer, the denial is
+  Landlock's `EACCES`, and UDP is unfiltered.
+- **`docs/gap-analysis.md` section 2 is fixed.** No provider credential is in
+  the environment: `[env] pass` is `GH_TOKEN`, the `GIT_*` identity vars and
+  `PI_OFFLINE`, and `auth.json` and `models-store.json` are both `{}`.
+- **`docs/gap-analysis.md` says bailey includes the private-netns commit.**
+  This session runs in a namespace that shows the host's `wlp13s0`, so private
+  network isolation was not active here.
+- **V18 moves from `suspected` to confirmed** via V42's mount mapping.

@@ -1,24 +1,25 @@
-# Gap analysis — bailey + errand, source-grounded (2026-09-15)
+# Gap analysis — bailey + errand, source-grounded (2026-09-15, revised 2026-09-29)
 
 Written after reading the current errand and bailey sources and the deployed
 behaviour of this host, with sandeval's battery as the probe set. This is the
 answer to "what is still left": what is fixed, what is by design, and what
 remains open, ranked by blast radius.
 
-## Deployed versions, inferred empirically
+The 2026-09-29 revision re-ran the battery (V5, V7, V37 and the new V39-V43)
+and re-read the sources at errand `24a8a9f` (v0.2.3) and bailey `71473e5`
+(v0.2.2). Sections 2 and 4 changed as a result; section 5 gained the
+path-less leads. `docs/path-less-surface.md` carries that pass in detail.
 
-- bailey includes 572899a (new mount API denied: open_tree/move_mount EPERM),
-  51a30ab (x32/int-0x80 syscalls refused with EPERM, measured), bbccb4a
-  (UTS namespace), 6bccff8+ (private netns). Whether 92fa57e (map the
-  caller's uid) is deployed is not decidable from inside: the cage runs as
-  uid 0, which the fix forbids unless the daemon itself runs as root.
-  Host-side check: the agent's uid inside the cage should equal the daemon
-  user's uid on the host.
-- errand includes aabf107 (the pull-request push runs from a fresh bare
-  clone, `pushWork`; the pre-push trap did not fire at the last turn end,
-  and the request file was consumed). It predates af33d66/1c2946e: the
-  provider credential is still passed into the sandbox (`[env] pass`),
-  where the egress broker would keep it out.
+## Deployed versions
+
+- Sources read at errand `24a8a9fcade4504162b5103b97e64c54997ed453` (v0.2.3,
+  2026-09-29) and bailey `71473e540ba19c41a5d287ba93d57b84e8cc1bc2` (v0.2.2,
+  2026-09-21). The build actually running as the daemon is not readable from
+  inside the sandbox, so behaviour below is measured, not assumed from these
+  commits.
+- Still not decidable from inside: whether `92fa57e` (map the caller's uid) is
+  deployed. Host-side check: the agent's uid inside the cage should equal the
+  daemon user's uid on the host.
 
 ## 1. The GitHub token is the blast radius (high, actionable)
 
@@ -42,13 +43,17 @@ credential helper already reads an env var; swapping the value it gets is a
 small change. sandeval now measures this on every run (V20 reports the
 scope names and flags high-blast scopes).
 
-## 2. The provider credential still rides in the sandbox env (medium, deploy)
+## 2. The provider credential no longer rides in the sandbox env (fixed, verified 2026-09-29)
 
-`ZAI_CODING_CN_API_KEY` is in the session environment. Upstream errand
-already fixed this class (af33d66 "keep the provider credential out of the
-sandbox", 1c2946e/384a7ee brokered provider egress), but the deployed
-daemon predates it. Deploy current errand and the sandbox stops holding a
-second spendable secret.
+This section said `ZAI_CODING_CN_API_KEY` was in the session environment.
+Measured on 2026-09-29: it is not. `[env] pass` is `GH_TOKEN`, `GIT_AUTHOR_*`,
+`GIT_COMMITTER_*` and `PI_OFFLINE`; `~/.pi/agent/auth.json` and
+`models-store.json` are both `{}`; no provider key appears anywhere in the
+environment. Upstream's af33d66/1c2946e fix is what this looked like from the
+other side. No action.
+
+Residual, unrunnable from inside: the broker nonce-replay experiment needs
+brokering armed, and it was not armed in this session.
 
 ## 3. The pull-request gate is a request, not a wall (accepted, document it)
 
@@ -69,21 +74,42 @@ note, not a code change.
 - x32/int-0x80 seccomp bypass: refused (EPERM), arch guard live.
 - New mount API (open_tree/move_mount/fsopen/fsconfig/mount_setattr):
   denied. Classic mount(2): denied.
-- Direct egress: every TCP connect denied at the seccomp/connect level,
-  both families; all egress rides the proxy, which enforces the port
-  allowlist (CONNECT 22/9999 refused, 443 allowed). Loopback inside the
-  cage answers from the proxy catch-all, not the host.
+- Direct egress: no direct path, and the layers are now told apart (V43,
+  2026-09-29). TCP connect to a port outside the allowlist is refused
+  `EACCES` by Landlock `ConnectTcp` (`enforce.rs:629-679`), not by seccomp;
+  allowed ports pass the syscall layer and are then dropped by the
+  `bailey_egress` nftables chain (`cli.rs:472-493`); UDP `connect` is
+  unfiltered, as bailey documents. Every TCP `bind` is denied because the
+  policy has no `bind_ports`. The broker port is added to the allowlist at
+  launch (`cli.rs:447-459`), so a passing connect to an unlisted port is the
+  broker path, not open egress.
 - PID/UTS namespaces: the errand daemon is invisible from inside, which
   retires the V29/V32/V33 process-control class on this deployment (the
-  vectors remain for sandboxes without a PID namespace).
+  vectors remain for sandboxes without a PID namespace). What is still
+  visible is the sandbox's own orchestrator: pid 1 is `pi`, in this mount
+  namespace, and its stdio descriptors are reachable through `/proc` (V5,
+  V39).
 - btrfs subvolume ioctls: denied (587fc6f).
 
 ## 5. Remaining leads, ranked
 
-1. Token scoping (this document, section 1) - the only finding with
+1. The write channel into the orchestrator's stdout pipe (V39, ship-blocker):
+   measured delivery, and the code path from a forged line to a host effect is
+   read at `client.rs:708`. Fix is structural - keep the orchestrator out of
+   the sandbox's `/proc`, or give it a socket rather than a pipe.
+2. The execute list does not cover `memfd` execution (V40): fix with seccomp
+   on `memfd_create`, `execveat(AT_EMPTY_PATH)` and `execve` under
+   `/proc/*/fd`.
+3. Token scoping (this document, section 1) - still the only finding with
    account-level blast radius.
-2. Deploy errand past af33d66 so the provider credential leaves the env.
-3. Host-side: confirm the bailey build is >= v0.1.4 and that the daemon
-   user is not root (the cage's uid 0 should map from the daemon uid).
-4. sandeval: keep V8/V31/V33-style regression vectors armed; the battery is
+4. The shared `$CARGO_HOME` write grant (V42): one tree across sessions, and
+   code written there runs on the next build.
+5. Abstract unix sockets bind and accept (V41): check the Landlock ABI, or
+   isolate the network namespace.
+6. Host-side: confirm the bailey build is >= v0.1.4, that the daemon user is
+   not root (the cage's uid 0 should map from the daemon uid), and
+   `nft list ruleset` to see which namespace holds `bailey_egress`.
+7. Re-run with the pre-`[network]` policy to settle whether V37's recorded bind
+   success or today's `EACCES` is the older state.
+8. sandeval: keep V8/V31/V33-style regression vectors armed; the battery is
    now the check that deployed == source where it matters.

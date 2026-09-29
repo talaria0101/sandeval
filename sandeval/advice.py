@@ -161,6 +161,26 @@ ADVICE = {
         "why": "The V1 metadata gap is not just tamper evidence: one chmod makes any named host binary the agent can read non-executable, so every user, CI job or service that execs it is denied until someone notices. Tool directories the sandbox mounts for the agent (like ~/.local/bin) are the natural target: dosing the agent's own linter or build tool is one syscall, and the outage is real while the repair is not obvious.",
         "fix": "Mount host read roots read-only so the VFS refuses chmod, or chown host tool trees to a uid the sandbox does not map so DAC refuses it. To restore a dosed binary: the vector's .sandeval-v38-*.json proof record holds the original mode - `./bin/sandeval run --clean --vector V38` (or host-verify/verify.sh --clean) heals from it; by hand, chmod the recorded mode back.",
     },
+    "V39": {
+        "why": "The orchestrator's stdout pipe is a write channel straight into the host control plane: fd 0 carries commands that are dispatched, fd 1 carries JSONL that is parsed with no authentication (a forged message_end posts as the agent), fd 2 becomes the death report the operator reads, and an over-long line ends the session. None of those objects has a path, so the write list never sees them.",
+        "fix": "Keep the orchestrator out of the sandbox's /proc - a pid namespace where it is not visible, or /proc mounted hidepid=2 with only the agent's tree - or give it stdio that is not a pipe reachable by inode (a socketpair whose other end never appears under /proc). A Landlock path rule cannot express this one.",
+    },
+    "V40": {
+        "why": "The execute list governs where files are, not what runs: content at a read-granted, execute-denied path can be copied into a memfd and executed, which is exactly the control that stops a replaced toolchain from being run. The resulting process keeps every other restriction, so this defeats the execute list rather than the sandbox.",
+        "fix": "Deny the path-less routes at the syscall layer: seccomp rules for memfd_create, for execveat with AT_EMPTY_PATH, and for execve whose path is under /proc/*/fd. Landlock has no rule that can name any of the three.",
+    },
+    "V41": {
+        "why": "An abstract unix socket has no path, so the filesystem rules cannot express a listener or a peer: anything sharing the network namespace can connect to it, and in landlock-only mode there is no network namespace to isolate the abstract namespace either.",
+        "fix": "Confirm the Landlock ABI is at least 6 so Scope::from_all is actually enforced rather than dropped best-effort, or isolate the network namespace, which also isolates the abstract namespace.",
+    },
+    "V42": {
+        "why": "A write grant on a mount that carries no session id is a shared tree: content written today is read by later sessions and by the host, and code in it runs on the next build. The grant is correct in kind and wider than it looks in the policy file.",
+        "fix": "Point CARGO_HOME at a session-scoped path under the state dir, or mount the shared cache read-only and layer a writable session-scoped registry on top.",
+    },
+    "V43": {
+        "why": "Egress is enforced in three places (Landlock port rules, a netfilter drop chain, and the absence of a route) and a PASS only says none of them let a direct connection through. Recording which layer answered is what makes a later regression visible as a change of layer instead of a silent retest.",
+        "fix": "Nothing to fix on a PASS. Keep the vector in the battery; when it fails, the detail's attempts table says whether Landlock stopped it, netfilter dropped it, or the route never existed.",
+    },
 }
 
 DEFAULT = {
