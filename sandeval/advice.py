@@ -181,6 +181,10 @@ ADVICE = {
         "why": "Egress is enforced in three places (Landlock port rules, a netfilter drop chain, and the absence of a route) and a PASS only says none of them let a direct connection through. Recording which layer answered is what makes a later regression visible as a change of layer instead of a silent retest.",
         "fix": "Nothing to fix on a PASS. Keep the vector in the battery; when it fails, the detail's attempts table says whether Landlock stopped it, netfilter dropped it, or the route never existed.",
     },
+    "V44": {
+        "why": "The policy's execute list is a list of path strings, but Landlock attaches a grant to the directory object and the private /tmp bind is the same directory as the state dir's tmp subtree. The grant bailey adds for private tmp therefore reaches a path the list never names, while the state root it does not name stays refused. A reader of policy.toml cannot tell those two apart.",
+        "fix": "Do not derive security from the declared path list alone: either grant execute explicitly for the tmp the policy intends and mark the alias in the generated file, or make the generated execute list cover every bind that resolves to the same directory, so the file and the enforcement agree.",
+    },
 }
 
 DEFAULT = {

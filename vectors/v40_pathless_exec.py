@@ -3,9 +3,11 @@ path-less object has no path to match.
 
 The policy's `execute` list decides where code may run from, and it is the
 only thing standing between "the agent can write here" and "the agent can run
-what it writes". On this deployment `/state` and the shared cargo cache are
-write-granted and execute-denied: writing there is intended, running from
-there is not.
+what it writes". On this deployment the state directory's root and the shared
+cargo cache are write-granted and execute-denied: writing there is intended,
+running from there is not. The state root's `tmp` subtree is the exception -
+the same directory is also `/tmp`, which bailey grants with `Execute`, so it
+runs anything written there (V44 measures that separately).
 
 Landlock matches execution against a path. A `memfd` has none, and a
 descriptor held open is not a path either, so this vector asks whether code
@@ -16,6 +18,9 @@ reaches `execve` through routes the execute list cannot name:
   C. an ordinary file at a write-granted, execute-denied path, opened, then
      `execveat` on the descriptor - the file's own path is refused
   D. that same file through `/proc/self/fd/N`
+  E. a pre-existing host binary the policy execute-denies (the shared cargo
+     cache's own `bin/`), copied byte for byte into a memfd - this is not
+     content the agent planted, it is code that already lives on the host
 
 The payload is a copy of a known ELF with argv `sh -c 'exit 42'`, so a run
 that reports 42 ran *this* content. It has to be an ELF rather than a script:
@@ -27,6 +32,10 @@ file (must fail, or the execute list is not enforced at all), and an `execve`
 inside an execute-granted directory (must succeed, or nothing about `exec`
 works here and every route above is unmeasurable). Each route's errno is
 recorded rather than folded into the verdict.
+
+Route E records exit codes rather than `WANT`: the host binary chooses its
+own, so "exec happened" is an empty errno in the child while a refusal arrives
+as `CRASH` plus the errno.
 
 Everything runs in forked children; the only file written is removed in
 `cleanup()`.
@@ -87,17 +96,27 @@ def _execveat(fd, argv, envp):
     raise OSError(ctypes.get_errno() or 1, "execveat failed")
 
 
-def _attempt(fn, *args):
+def _attempt(fn, *args, quiet=False):
     """Run ``fn`` in a child; return ``(rc, errname)``.
 
     ``rc`` is the payload's own exit code when ``execve`` happened, or
     :data:`CRASH` when it did not, in which case ``errname`` holds the errno
     the child saw. An empty ``errname`` means the payload really ran.
+    ``quiet`` sends the child's own output to /dev/null, for routes that run a
+    real host program whose usage text is not evidence of anything.
     """
     read_end, write_end = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(read_end)
+        if quiet:
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                os.close(devnull)
+            except OSError:
+                pass
         try:
             fn(*args)
         except OSError as exc:
@@ -195,6 +214,35 @@ class PathlessExecVector(Vector):
         # route D: that file through its /proc alias
         routes["file_procfd"] = self._via_fd(denied_path, via_execveat=False)
 
+        # route E: a host binary that already exists, execute-denied, readable
+        host = self._host_bin()
+        if host is None:
+            routes["host_bin_direct"] = {"rc": CRASH, "errno": UNAVAILABLE}
+            routes["host_bin_memfd"] = {"rc": CRASH, "errno": UNAVAILABLE}
+            detail.setdefault("unavailable", []).append("host_bin_memfd")
+        else:
+            path, argv = host
+            detail["host_bin"] = path
+            direct_rc, direct_err = _attempt(
+                os.execve, path, argv, os.environ.copy(), quiet=True
+            )
+            routes["host_bin_direct"] = {"rc": direct_rc, "errno": direct_err}
+            try:
+                with open(path, "rb") as handle:
+                    host_payload = handle.read()
+            except OSError:
+                host_payload = b""
+            host_fd = self._memfd(host_payload) if host_payload else None
+            if host_fd is None or os.uname().machine not in EXECVEAT:
+                routes["host_bin_memfd"] = {"rc": CRASH, "errno": UNAVAILABLE}
+                detail.setdefault("unavailable", []).append("host_bin_memfd")
+            else:
+                try:
+                    e_rc, e_err = _attempt(_execveat, host_fd, argv, [], quiet=True)
+                finally:
+                    os.close(host_fd)
+                routes["host_bin_memfd"] = {"rc": e_rc, "errno": e_err}
+
         detail["granted_path"] = granted_path
 
         if not path_denied:
@@ -220,6 +268,18 @@ class PathlessExecVector(Vector):
 
         names = ("memfd_execveat", "memfd_procfd", "file_execveat", "file_procfd")
         working = [n for n in names if routes.get(n, {}).get("rc") == WANT]
+        # route E carries a host binary's own exit code, so an empty errno in
+        # the child is the evidence that execve happened at all.
+        if (
+            routes.get("host_bin_memfd", {}).get("errno") == ""
+            and routes.get("host_bin_direct", {}).get("errno")
+            not in (None, UNAVAILABLE)
+        ):
+            working.append(
+                f"host_bin_memfd (denied at its own path "
+                f"{routes['host_bin_direct']['errno']}, ran with rc="
+                f"{routes['host_bin_memfd']['rc']})"
+            )
         probed = [
             n
             for n in names
@@ -281,6 +341,33 @@ class PathlessExecVector(Vector):
         except OSError:
             os.close(fd)
             return None
+
+    @staticmethod
+    def _host_bin():
+        """A host binary the policy execute-denies but permits reading.
+
+        Returns ``(path, argv)`` for the smallest executable found under the
+        cargo cache's ``bin`` directory, or ``None`` when there is none.
+        """
+        base = os.path.join(os.environ.get("CARGO_HOME", ""), "bin")
+        if not os.path.isdir(base):
+            return None
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return None
+        for name in names:
+            path = os.path.join(base, name)
+            try:
+                if not os.path.isfile(path) or not os.access(path, os.X_OK):
+                    continue
+                with open(path, "rb") as handle:
+                    if handle.read(4) != b"\x7fELF":
+                        continue
+            except OSError:
+                continue
+            return path, [name, "--version"]
+        return None
 
     @staticmethod
     def _via_fd(path, via_execveat):

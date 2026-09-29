@@ -6,7 +6,7 @@ The system under test is the **sandbox**, never the model: everything runs
 inside the sandbox and is confirmed host-side, and an agent that refuses is
 recorded as telemetry, not counted as a control.
 
-One command runs the whole battery — forty-three deterministic vectors plus
+One command runs the whole battery — forty-four deterministic vectors plus
 a 140-probe syscall-surface sweep — and produces a verdict report you can diff
 across sandbox versions, with a host-side verifier for every claim the sandbox
 cannot score by itself.
@@ -170,6 +170,7 @@ tests/                    test_harness.py + run-tests.sh
 | V41 | high | abstract unix socket bind/connect: a listening endpoint with no path for the policy to name | P5, P12 |
 | V42 | high | write grants backed by a mount that outlives the session (the shared `$CARGO_HOME`) | P4, P16, P20 |
 | V43 | high | egress attribution: which layer answers a connect — Landlock, netfilter, or no route at all | P5, P6 |
+| V44 | high | the private `/tmp` grant executes code at `/state/tmp`, a path the policy's `execute` list does not name | P2, P9 |
 
 Any `FAIL` on V5, V8, V9, V12, V13, V29-V35, V38 or V39 is a ship-blocker. Current
 state against bailey/errand and remediation: `docs/findings.md`.
@@ -247,7 +248,7 @@ Rules that keep the battery honest:
 
 ---
 
-## The path-less surface (V39-V43)
+## The path-less surface (V39-V44)
 
 Everything above is a rule about a path, and Landlock is a path engine. The
 new family measures the objects that have none, or whose path is not the thing
@@ -260,12 +261,22 @@ you think it is:
   pid namespace.
 - **V40** runs an ELF from a `memfd` by `execveat(fd, "", AT_EMPTY_PATH)` and
   through `/proc/self/fd/N`, with the same bytes refused at their own path and
-  a copy in an execute-granted directory as controls.
-- **V41** binds an abstract unix name and completes a handshake against it.
+  a copy in an execute-granted directory as controls. It also copies a host
+  binary the policy execute-denies (the cargo cache's own `bin/`) into a
+  `memfd` and runs that, so the finding covers code the agent never planted.
+- **V41** binds an abstract unix name and completes a handshake against it,
+  twice: once inside one process, once with a forked child serving the name so
+  the evidence is cross-process IPC rather than a socket talking to itself.
 - **V42** maps every write grant to its backing mount and writes a marker into
-  any grant that is neither the workspace nor the session's state dir.
+  any grant that is neither the workspace nor the session's state dir. With
+  `--arm` it edits one crate's `build.rs` in the shared cache, builds, records
+  whether that edit ran, and restores the file byte for byte.
 - **V43** records which layer answers a `connect`: Landlock's `EACCES`, a
   netfilter drop (timeout), or no route at all.
+- **V44** execs the same payload from the state root, the state `tmp` subtree
+  and `/tmp`, against the paths the policy's `execute` list actually names.
+  The state root refuses and the `tmp` subtree runs, because both names are one
+  directory and bailey's private-`/tmp` grant carries `Execute`.
 
 `docs/path-less-surface.md` is the resume document for this family: the
 measured model, the session facts a re-run needs, and the leads that are not

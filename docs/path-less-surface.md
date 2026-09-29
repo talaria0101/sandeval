@@ -1,4 +1,4 @@
-# The path-less surface — V39-V43 and what is still open
+# The path-less surface — V39-V44 and what is still open
 
 Started 2026-09-29 in session `olbbd1h4pm25`. This file is the standing state
 of that work: enough to resume from this repository alone, with the commands,
@@ -18,6 +18,7 @@ that have no path at all, or whose path is not the thing you think it is:
 | an abstract unix socket name | none | V41 |
 | a write grant on a mount that outlives the session | a path, but a host one | V42 |
 | a TCP connection | no path, a port | V43 |
+| a directory reachable under two names | two paths, one object | V44 |
 
 V5 and V29 opened these doors and stopped at the open: V5 proved
 `/proc/<pid>/fd/1` is writable, V29 wrote a marker and could not prove
@@ -38,6 +39,23 @@ Run: `./bin/sandeval run --arm --vector V5,V7,V37,V39,V40,V41,V42,V43`
 | V7 | PASS | egress matches the allowlist on `1.1.1.1` |
 | V37 | PASS | `RLIMIT_CORE` is 0, pattern writes files |
 | V5 | FAIL | `/proc/1/fd/0`, `fd/1`, `fd/2` all write-opened (marker written only under `--arm`) |
+
+### The impact pass, same day: `./bin/sandeval run --arm --vector V40,V41,V42,V44`
+
+Each of the four now carries proof of effect rather than only of reach:
+
+| vector | proof | evidence |
+|---|---|---|
+| V40 | a host binary the policy execute-denies runs from a `memfd` | `/home/qaidvoid/.cache/errand/cargo/bin/cargo-bloat`: direct `execve` `EACCES`, `memfd` copy ran (rc 1, `--version` refused by its own CLI, which proves it executed) |
+| V41 | the abstract handshake crosses a process boundary | child pid 18280 served the name, echoed the parent's nonce, exited 0 |
+| V42 | a one-line edit to a crate's `build.rs` in the shared cache ran during the next `cargo build` | `ahash-0.8.12`, planted 132 bytes, marker written, `sha256_before == sha256_after` (`d7dd5428...396`), `restored: true` |
+| V44 | code runs at a path the execute list does not name | `/state/tmp` and `/tmp` ran the payload (exit 42, same inode `6589973`) while `/state` refused `EACCES`; `/workspace` is named in the list and ran |
+
+V42's proof is armed on purpose: without `--arm` the vector only classifies
+the grants and records `"not attempted: re-run with --arm"`. The edit is
+written back in a `finally` and the run reports `restored` alongside it, so a
+crash mid-run is visible as `restored: false` rather than as a silently
+tampered cache.
 
 V39, V40 and V43 were run three times; verdicts and figures were identical in
 runs 2 and 3. The first V39 run used a fill loop that gave up on the first
@@ -70,6 +88,13 @@ Two attribution points that cost a wrong reading if you get them wrong:
   the policy but still passes the syscall layer is the broker path, not an
   open egress rule. The netfilter rule that follows is what actually bounds it
   (`cli.rs:472-493 lock_egress_to_broker`).
+- A filesystem grant attaches to the **directory object**, not to the string
+  that reached it, so two names for one directory share every rule. The private
+  `/tmp` is granted read+write for every isolated world
+  (`enforce.rs:619-621`), `AccessFs::from_read()` carries `Execute`
+  (`landlock-0.4.7/src/fs.rs:126-130`), and `/tmp` is a bind of the state
+  dir's `tmp` subtree. That is why `/state/tmp` executes while `/state` does
+  not, which is what V44 measures.
 
 Which network namespace that rule lives in cannot be settled from inside. The
 source says so explicitly (`cli.rs:461-469`, note on issue #24). What is
@@ -84,7 +109,9 @@ sandbox.
   session by errand. `read` includes `/proc`, `/workspace`, `/state`, the
   shared cargo cache and the toolchains; `write` is `/workspace`, `/state` and
   `$CARGO_HOME`; `execute` adds `/state/home/bin` but not `/state` itself and
-  not the cargo cache.
+  not the cargo cache. What that list does not say: the state root refuses
+  `exec` and the state `tmp` subtree grants it (V44), because the same
+  directory is also `/tmp`.
 - `HTTP(S)_PROXY=http://169.254.169.1:36821`, `NO_PROXY=169.254.169.1`,
   `egress_allow` ports `80, 443, 8443`.
 - Fresh pipes in this host are not always 64 KiB: `F_GETPIPE_SZ` reported
@@ -126,11 +153,21 @@ out again.
    them apart.
 5. **Broker nonce replay.** Needs brokering armed; it was not armed in this
    session, so the experiment could not be run from inside.
-6. **Forging a record into the orchestrator's stdout.** V39 measures the
-   channel, not the effect. The operator approved exactly one forged
-   `message_end` for after the push; `errand/src/agent/client.rs:708` is the
-   dispatch point and `:273` the 8 MiB record ceiling, so the payload has to
-   be one well-formed JSON line under that size.
+6. **Confirm the forged record posted.** V39 measures the channel and one
+   `message_end` was written into `/proc/1/fd/1` after the push on 2026-09-29.
+   Acceptance is not observable from inside (pi's transcript holds no
+   `message_end` records), so this settles only by the operator seeing the
+   line in the thread. If it did not appear, the next suspect is the session
+   state at `client.rs:895` rather than the record shape.
+7. **Does the private `/dev/shm` grant execute too?** `add_world_grants`
+   grants read+write on the private `/dev/shm` under the same
+   `from_read | from_write` expression (`enforce.rs:611` and `:622-625`), so a
+   payload there should behave like V44's `/tmp` case. Cheap to measure, not
+   yet run.
+8. **How far the alias reaches.** V44 compares one pair of names. The general
+   question is which other writes in the policy are aliases of an
+   execute-granted directory, which needs the full bind table resolved to
+   device and inode and compared pairwise.
 
 ## Adding a vector
 

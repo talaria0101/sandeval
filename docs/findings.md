@@ -805,3 +805,120 @@ Host-side `nft list ruleset` would settle it.
   This session runs in a namespace that shows the host's `wlp13s0`, so private
   network isolation was not active here.
 - **V18 moves from `suspected` to confirmed** via V42's mount mapping.
+
+## v11 pass (2026-09-29, same session): proof of impact
+
+v10 showed that these objects are reachable. This pass makes each vector
+prove an effect, adds one vector for an alias that turned up while proving
+the others, and records two defects in the v10 code itself.
+
+Run: `./bin/sandeval run --arm --vector V40,V41,V42,V44 --json sandeval-report.json`
+(report in the repo root, gitignored). All four verdicts were the same in the
+two runs made during this pass.
+
+### V40 - a host binary the policy execute-denies runs from a memfd (FAIL, high)
+
+**What.** Route E reads `/home/qaidvoid/.cache/errand/cargo/bin/cargo-bloat`,
+an ELF that already exists on the host, and execs it two ways: its own path
+returns `EACCES`, a byte-identical copy in a `memfd` runs (child rc 1, its own
+"can be run only via `cargo bloat`" message, which is the program refusing our
+argv rather than the kernel refusing the exec).
+
+**Why.** Routes A-D ran content the agent planted. The case the execute list
+exists for is a *pre-existing* binary: read is granted on the cache, execute is
+not, and the intent is that a replaced toolchain cannot be run. The bytes can
+still be run, they just have to be carried somewhere without a path.
+
+**Impact.** The execute list governs path-based `execve` only. Combined with
+A-D it is now measured on both sides: planted content and host content.
+
+**Fix.** Unchanged from v10: seccomp rules for `memfd_create`, for `execveat`
+with `AT_EMPTY_PATH`, and for `execve` under `/proc/*/fd`.
+
+### V41 - the abstract handshake crosses a process boundary (FAIL, high)
+
+**What.** The parent forks; the child binds the abstract name and serves it,
+the parent connects, sends an 8-byte nonce and reads it back. Detail:
+`{"child_pid": 18280, "connected": true, "echo_ok": true, "child_rc": 0}`.
+
+**Why.** v10 bound and connected inside one process, which a reader can
+dismiss as a socket talking to itself.
+
+**Impact.** Two processes exchange data through a namespace the filesystem
+rules cannot name, in a session whose `reset` is expressed entirely in paths.
+
+### V42 - a one-line edit in the shared cache ran at the next build (FAIL, high, armed)
+
+**What.** With `--arm`: the vector picks a crate with a `build.rs` from the
+shared registry (`ahash-0.8.12`), builds a scratch project offline against it
+as a baseline (rc 0), inserts `std::fs::write(<marker>, b"TAMPERED_CODE_EXECUTED").ok();`
+at the top of that crate's `fn main()` (132 bytes), builds again into a fresh
+target dir (rc 0), and finds the marker file. Then it writes the original bytes
+back in a `finally` and compares sha256:
+
+```
+executed: true   restored: true
+sha256_before: d7dd5428c78b80bb3c99068561641ec661f0f94defbda17f85b443e358ab6396
+sha256_after:  d7dd5428c78b80bb3c99068561641ec661f0f94defbda17f85b443e358ab6396
+```
+
+`grep -r TAMPERED_CODE_EXECUTED <cache>/registry/src` after the run returns
+nothing. Without `--arm` the vector records
+`"build_exec": "not attempted: re-run with --arm"` and does not touch the
+cache.
+
+**Why.** The grant is not only persistence, it is the input of every build
+that runs in any session. Build-time code runs as the user building, before
+any test of the produced binary.
+
+**Impact.** Cross-session code execution, demonstrated end to end rather than
+by writing a marker. The prior pass's `TAMPERED_CODE_EXECUTED` claim is now
+reproduced here with the restore hash attached.
+
+**Fix.** Unchanged: session-scoped `CARGO_HOME`, or a read-only shared cache
+with a writable session layer on top.
+
+### V44 - the private /tmp grant executes /state/tmp, a path the list does not name (FAIL, high)
+
+**What.** The same payload seeded in four places, with the policy's own
+`execute` list parsed out of `policy.toml` (17 entries after alias resolution):
+
+| location | declared in `execute`? | result |
+|---|---|---|
+| `/state/.sandeval-v44.bin` (state root) | no | `EACCES`, refused |
+| `/state/tmp/.sandeval-v44.bin` | no | ran, exit 42 |
+| `/tmp/.sandeval-v44.bin` | no | ran, exit 42 |
+| `/workspace/.sandeval-v44.bin` | yes | ran, exit 42 (control) |
+
+`/tmp` and `/state/tmp` report the same inode (`6589973`) and the same device:
+they are one directory reached under two names.
+
+**Why.** Landlock attaches a grant to the directory object, not to the path
+string used to reach it. bailey grants read+write on the private `/tmp` for
+every isolated world (`enforce.rs:619-621`), and `AccessFs::from_read()`
+carries `Execute` (`landlock-0.4.7/src/fs.rs:126-130`), so that grant is also
+an execute grant. `/tmp` is a bind of the state dir's `tmp` subtree, so the
+grant reaches `/state/tmp` while `/state` itself stays refused.
+
+**Impact.** A reader of `policy.toml` sees `/state` absent from `execute` and
+concludes nothing under it runs. A payload written to `/state/tmp` runs
+directly: no `memfd`, no descriptor route, no kernel trick. The declared list
+under-describes the enforcement, in the direction that is silent.
+
+**Fix.** Keep the file and the enforcement in agreement: either mark the alias
+in the generated policy or resolve every bind to its directory and emit the
+list from that, so what is declared is what is enforced.
+
+### Corrections to this pass's own earlier work
+
+- **v10 said "`/state` and the shared cargo cache are write-granted and
+  execute-denied".** Only the state root is execute-denied; `/state/tmp`
+  executes. V40's control seeds the state root, so its verdict stands, and
+  the v10 entry named that exact path, but V40's docstring claimed the whole
+  state tree. The docstring is fixed; V44 carries the exception.
+- **V42 classified session scope from `basename("/state")`,** which is the
+  string `state` and matches any mount root containing that word. It now
+  resolves the `/state` bind through the policy's `{ path, at }` alias and uses
+  the host path's basename (`olbbd1h4pm25`). Before the fix the verdict was
+  right by coincidence; after it the `session_scoped` flags are derived rather
+  than lucky.

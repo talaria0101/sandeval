@@ -8,9 +8,12 @@ listening and about IPC with whatever else shares the network namespace.
 
 This vector binds an abstract name, and when the bind lands it listens and
 connects to itself, so the report distinguishes "the name is reserved" from
-"traffic actually flows". It also lists any abstract endpoints already
-visible in `/proc/net/unix`, because those are the ones a host service could
-be reached through without any filesystem route at all.
+"traffic actually flows". It then repeats the handshake with a **second
+process**: the listener is a forked child, so the evidence is cross-process
+IPC through a namespace that carries no path, not a socket talking to itself
+in one address space. It also lists any abstract endpoints already visible
+in `/proc/net/unix`, because those are the ones a host service could be
+reached through without any filesystem route at all.
 
 Nothing outside the probe is contacted; both sockets close in `cleanup()` and
 the abstract name disappears with them.
@@ -57,11 +60,21 @@ class AbstractSocketVector(Vector):
         detail["stream"] = stream
         detail["dgram"] = dgram
 
+        xproc = self._cross_process()
+        detail["cross_process"] = xproc
+
         if stream["bind"] and stream["bind"].startswith("ok"):
+            extra = ""
+            if xproc.get("echo_ok"):
+                extra = (
+                    f"; a second process (pid {xproc.get('child_pid')}) served the "
+                    f"name and echoed the parent's nonce"
+                )
             return Result(
                 Status.FAIL,
                 "abstract unix bind succeeded and the endpoint accepts a connection: "
-                "a path-less listen surface the policy's filesystem rules cannot name",
+                "a path-less listen surface the policy's filesystem rules cannot name"
+                + extra,
                 detail,
             )
         if stream["bind"] == "unsupported":
@@ -109,6 +122,74 @@ class AbstractSocketVector(Vector):
                 peer.close()
         finally:
             listener.close()
+        return out
+
+    @staticmethod
+    def _cross_process():
+        """Serve an abstract name from a child process and echo a nonce back.
+
+        Returns ``{connected, echo_ok, child_pid, error}``. The child exits on
+        its own once the handshake is done, so no listener is left behind.
+        """
+        out = {
+            "connected": False,
+            "echo_ok": False,
+            "child_pid": None,
+            "error": None,
+        }
+        nonce = os.urandom(8)
+        name = f"\0sandeval-v41-xproc-{os.getpid()}"
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            listener = None
+            try:
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(name)
+                listener.listen(1)
+                listener.settimeout(3.0)
+                conn, _ = listener.accept()
+                with conn:
+                    got = conn.recv(64)
+                    conn.sendall(got)
+                code = 0 if got == nonce else 2
+            except Exception:  # noqa: BLE001 - the child reports through its exit code
+                code = 3
+            finally:
+                if listener is not None:
+                    listener.close()
+            os._exit(code)
+
+        out["child_pid"] = pid
+        peer = None
+        try:
+            peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            peer.settimeout(3.0)
+            import time as _time
+
+            deadline = 3.0
+            while True:
+                try:
+                    peer.connect(name)
+                    break
+                except OSError:
+                    deadline -= 0.05
+                    if deadline <= 0:
+                        raise
+                    _time.sleep(0.05)
+            out["connected"] = True
+            peer.sendall(nonce)
+            out["echo_ok"] = peer.recv(64) == nonce
+        except OSError as exc:
+            out["error"] = errno_name(exc)
+        finally:
+            if peer is not None:
+                peer.close()
+        try:
+            _, status = os.waitpid(pid, 0)
+            out["child_rc"] = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:
+            pass
         return out
 
     def cleanup(self, ctx):
