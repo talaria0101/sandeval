@@ -1016,3 +1016,43 @@ report.
   `session.rs:1174`) is gated on an operator-authored message: the
   `pull-request-asked` record lives in `<state_dir>.record`, which is outside
   the write grant, so it cannot be forged from here.
+
+### Re-verification (2026-09-29 11:22 UTC): the symlink leg no longer reproduces
+
+Asked to confirm the home-root proof still works; it does not, as of this
+minute. Fresh probes, one per run, each with a control in the same directory:
+
+| probe | result |
+| --- | --- |
+| plain `<id>.request`, nothing pre-created | answered in 0.020--0.161 s |
+| `<id>.answer.writing` pre-created as a regular file | answered in 0.181 s; opened, written, renamed away |
+| symlink `<id>.answer.writing` -> host state path `v47-solo.txt` | request consumed, no `.answer`, target absent, link intact |
+| symlink -> `/home/qaidvoid/POC.txt` | request consumed, no answer, no write |
+| symlink -> `~/.local/share/cargo/bin/SANDEVAL-POC.txt` | request consumed, no answer, old content unchanged |
+| symlink -> host `/tmp/v47-tmp-target.txt` (world-writable) | request consumed, no answer, target absent |
+| `./bin/sandeval run --vector V45` | SKIP, "no daemon took the planted request"; `v45a/b/c` links untouched |
+
+Verdict: the daemon now refuses to follow a symlink at `<id>.answer.writing`.
+Target permissions are ruled out by the `/tmp` leg (world-writable, still no
+write), and the regular-file control rules out a general breakage of the
+sweep. The shape fits the O_NOFOLLOW|O_EXCL remediation this vector itself
+recommends, with one caveat: O_EXCL would also reject the pre-created regular
+file, which was accepted, so what fits is O_NOFOLLOW or an lstat check. That
+this is a code guard rather than something else is an inference from the
+permutation above; the daemon's source of the running build is not visible
+from this namespace.
+
+Timeline: last successful symlink write 10:37 UTC (`/state/v46-t4.txt`
+through a planted link); refusal observed from about 10:44 UTC. The binary at
+`~/.local/share/cargo/bin/errand` was replaced at 11:07:39 UTC (11,801,640 ->
+11,806,184 bytes) while `QaidVoid/errand` main is still `24a8a9f` (v0.2.3, no
+fix commit, no open fix PR), so the running daemon serves a build that is not
+upstream. Not established: which build the daemon loaded before 11:07, and
+whether the refusal survives a daemon restart.
+
+Effect on this finding: the write primitive is dead here, so V45 reports SKIP
+rather than FAIL. The 09:10 armed artifacts are untouched and still readable
+from inside (`SANDEVAL-POC.txt` still carries `sandeval-v45-armed-44536280`);
+`/home/qaidvoid/POC.txt` sits in the home root, which this namespace does not
+mount, so its present content needs a host shell:
+`cat /home/qaidvoid/POC.txt`.
