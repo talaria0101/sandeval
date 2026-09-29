@@ -102,7 +102,7 @@ against a previous report without leaving the run command.
 bin/sandeval              runner CLI (Python stdlib only)
 run.sh                    one-command unattended run (vectors + sweep + reports)
 sandeval/                 runner + core types
-vectors/                  v01..v43, auto-discovered
+vectors/                  v01..v45, auto-discovered
 tools/                    C helpers + git_p15_trap.sh
 sweep/                    landlock-surface-sweep.sh — syscall-surface conformance
 host-verify/verify.sh     host-side confirmation + cleanup
