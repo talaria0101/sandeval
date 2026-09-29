@@ -185,6 +185,10 @@ ADVICE = {
         "why": "The policy's execute list is a list of path strings, but Landlock attaches a grant to the directory object and the private /tmp bind is the same directory as the state dir's tmp subtree. The grant bailey adds for private tmp therefore reaches a path the list never names, while the state root it does not name stays refused. A reader of policy.toml cannot tell those two apart.",
         "fix": "Do not derive security from the declared path list alone: either grant execute explicitly for the tmp the policy intends and mark the alias in the generated file, or make the generated execute list cover every bind that resolves to the same directory, so the file and the enforcement agree.",
     },
+    "V45": {
+        "why": "The daemon answers a request file whose name it takes from a directory the sandbox can write, and it opens <id>.answer.writing with create+truncate and no O_NOFOLLOW before renaming. Any symlink there is followed, in the daemon's own namespace, as the operator's uid: the sandbox's policy is not consulted because the open never happens in the sandbox.",
+        "fix": "Open the answer file with O_NOFOLLOW|O_EXCL (or refuse when the entry is a symlink), and take the id only from a name the daemon itself created, so a sandbox-controlled filename cannot choose the write target. Requiring the request file to be a regular file with a fixed suffix set closes the same door on the read side.",
+    },
 }
 
 DEFAULT = {

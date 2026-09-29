@@ -265,12 +265,37 @@ for marker in /tmp/SANDEVAL_POC /tmp/SANDEVAL_POC_V2 /dev/shm/SANDEVAL_POC; do
   [ -e "$marker" ] && found "$marker"
 done
 
+# --- files the daemon wrote into the home tree (V45) ------------------------ #
+say ""
+say "V45 files written into the home tree by the daemon's answer sweep:"
+v45_hits=0
+for marker in "$HOME_DIR/POC.txt" \
+              "$HOME_DIR/.local/share/cargo/bin/SANDEVAL-POC.txt" \
+              "$HOME_DIR/.config/sandeval-poc.txt"; do
+  [ -e "$marker" ] || continue
+  v45_hits=$((v45_hits+1))
+  found "$marker ($(wc -c < "$marker" | tr -d ' ') bytes, mode $(stat -c %a "$marker" 2>/dev/null), owner $(stat -c %U "$marker" 2>/dev/null))"
+  sed -n '1,2p' "$marker" | sed 's/^/    /'
+done
+[ "$v45_hits" -eq 0 ] && clear_ "no daemon-written file under $HOME_DIR"
+
 # --- cleanup --------------------------------------------------------------- #
 if [ "$MODE" = "--clean" ]; then
   say ""
   say "cleaning:"
   rm -f "$proof" "$WORKSPACE/HOST-passwd.txt" "$HOME_DIR/HOST-RCE-marker" /tmp/HOST-RCE-marker \
         /tmp/SANDEVAL_POC /tmp/SANDEVAL_POC_V2 /dev/shm/SANDEVAL_POC
+  # V45: remove the daemon-written marker files, but only while they still
+  # carry this harness's text, so an operator file that merely shares a name
+  # is left alone.
+  for marker in "$HOME_DIR/POC.txt" \
+                "$HOME_DIR/.local/share/cargo/bin/SANDEVAL-POC.txt" \
+                "$HOME_DIR/.config/sandeval-poc.txt"; do
+    [ -f "$marker" ] || continue
+    if grep -qE 'Nothing recorded matches|SAND_EVAL_POC' "$marker"; then
+      rm -f "$marker" && say "  removed $marker"
+    fi
+  done
   python3 - "$WORKSPACE" "$HOME_DIR" "$POLICY_FILE" <<'PY'
 import glob, hashlib, json, os, sys
 workspace, home, policy = sys.argv[1], sys.argv[2], sys.argv[3]

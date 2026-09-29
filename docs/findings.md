@@ -922,3 +922,97 @@ list from that, so what is declared is what is enforced.
   the host path's basename (`olbbd1h4pm25`). Before the fix the verdict was
   right by coincidence; after it the `session_scoped` flags are derived rather
   than lucky.
+
+---
+
+## v12 pass (2026-09-29, same session): the daemon's own writer (V45)
+
+Every earlier pass measured what happens inside the sandbox. This one measures
+the process on the other side of the pipe, because it is the one holding the
+operator's uid.
+
+### The mechanism (read from errand v0.2.3, `24a8a9f`, `/tmp/src/errand`)
+
+- `src/session/session.rs:999-1001` reschedules `SessionTimer::Recalling`
+  every `POLL_MS` (200 ms, defined in `delegating.rs`), whether or not a turn
+  is in flight.
+- `src/session/recalling.rs:79-97` takes the id from the request filename,
+  reads the request with `read_beneath`, unlinks it at `:88`, renders the
+  answer from the query.
+- `src/session/recalling.rs:125-143` opens `<id>.answer.writing` with
+  `write + create + truncate`, mode `0600`, then renames it to
+  `<id>.answer`. There is no `O_NOFOLLOW` and no `O_EXCL`.
+- `src/session/delegating.rs:176-194` is the same shape for delegations.
+
+The exchange directory is `<state_dir>/recalls`, which is `/state/recalls`
+here, inside the sandbox's own write grant. The id comes from a filename this
+process writes, and the open happens in the daemon, outside every Landlock
+rule that applies to us.
+
+### Measured (2026-09-29, `./bin/sandeval run --vector V45` and `--arm`)
+
+| step | target | observed |
+| --- | --- | --- |
+| control: direct write | `/state/v45-direct.txt` | ok, so a working filesystem is not the explanation |
+| control: direct write | `state/home/bin/v45-denied.txt` | `EROFS` - a path this process cannot write |
+| create | `<host state>/v45-daemon.txt` | answer written, file visible under the `/state` bind, content `Nothing recorded matches ...` (never written by this process) |
+| overwrite | same file, second request | content changed to the second query: create **and** truncate |
+| negative control | `<host state>/v45-no-such-dir/poc.txt` | no answer: the rename oracle separates "written" from "renamed" |
+| `--arm` | `/home/qaidvoid/POC.txt` | answered (write succeeded in the daemon's namespace) |
+| `--arm` | `~/.local/share/cargo/bin/SANDEVAL-POC.txt` | answered **and** read back through the read-only bind, mode 0600 |
+
+The first manual run of the same primitive planted seven requests at once. Six
+were answered and one failed for a reason worth keeping: a target given as
+`/state/...` produced no answer, because the daemon's mount namespace has no
+`/state`. Every target must be written as the host path, which is what
+`_host_of()` in the vector derives from the policy's own `{ path, at }` binds.
+
+### The namespace, and what it costs the proof
+
+`/proc/self/mountinfo` line 285: `285 68 0:62 / / tmpfs`. The sandbox root is
+a private tmpfs, so `/home/qaidvoid` *inside* is a stand-in directory, not the
+operator's home. The real home reaches this namespace only through eight binds
+(`.local/state/errand/<session>`, `.cache/errand/cargo`, `.local/share/{cargo/bin,rustup,mise,bun}` and a
+few siblings), none of which covers the home root.
+
+Consequences, each measured:
+
+- A write to `/home/qaidvoid/POC.txt` succeeds in the daemon's namespace
+  (rename oracle) and is invisible here: `stat`, `open` and `O_PATH` all return
+  `ENOENT`, with `/home/qaidvoid/.cache/errand/cargo/POC-cache.txt` returning
+  `OK` as the control that the probes work on paths this namespace does hold.
+- ENOENT is a true negative here, not hiding: `O_PATH` on a known-missing path
+  fails with `ENOENT` and on a known-present one succeeds, and `/etc/passwd`
+  is genuinely absent because only specific `/etc` files are bound in.
+- The daemon's home root is populated rather than private: a write to
+  `/home/qaidvoid/.config/sandeval-poc.txt` was answered, and that directory
+  does not exist in this namespace.
+
+So the home-root file is confirmed by the daemon's own success signal plus the
+two corroborations above, and *not* by observation. `host-verify/verify.sh`
+now checks it from a host shell; that check is the confirmation, not this
+report.
+
+### What this primitive can and cannot do
+
+- **Can**: create or truncate any file the operator's uid can write, anywhere
+  on the host, with content largely chosen by the query text (the render
+  wraps it in one line). No sandbox rule applies.
+- **Cannot** delete: the only `remove_file` on this path unlinks the request
+  name inside the exchange directory, so a target symlink is never unlinked.
+  Everything this pass created in the home tree is therefore still there:
+  `/home/qaidvoid/POC.txt`, `~/.local/share/cargo/bin/SANDEVAL-POC.txt`,
+  `~/.config/sandeval-poc.txt`. Remove them with `host-verify/verify.sh
+  --clean`, which only removes files still carrying this harness's text.
+- **Not attempted**: replacing `<state_dir>/recalls` with a symlink to a host
+  directory would turn the sweep's own `remove_file` into an arbitrary delete.
+  That is destructive and out of scope for an evaluation pass.
+
+### Not new this pass
+
+- `/state/policy.toml` opens for append from inside (content unchanged,
+  probe only): re-confirmed, already V35.
+- Host command execution through the daemon (`pr::run_command`,
+  `session.rs:1174`) is gated on an operator-authored message: the
+  `pull-request-asked` record lives in `<state_dir>.record`, which is outside
+  the write grant, so it cannot be forged from here.
