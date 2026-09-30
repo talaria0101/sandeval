@@ -1,0 +1,9 @@
+name: SANDEVAL_3005492 probe
+on:
+  push:
+    branches: [triage2-SANDEVAL-3005492]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo SANDEVAL_3005492-remote-exec; id; whoami; date -u
